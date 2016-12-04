@@ -36,10 +36,11 @@
 #include <proto/channel.h>
 #include <proto/fd.h>
 #include <proto/frontend.h>
-#include <proto/log.h>
 #include <proto/hdr_idx.h>
-#include <proto/proto_tcp.h>
+#include <proto/log.h>
+#include <proto/proto_h2.h>
 #include <proto/proto_http.h>
+#include <proto/proto_tcp.h>
 #include <proto/proxy.h>
 #include <proto/sample.h>
 #include <proto/stream.h>
@@ -129,8 +130,15 @@ int frontend_accept(struct stream *s)
 		shut_your_big_mouth_gcc(write(1, trash.str, trash.len));
 	}
 
-	if (fe->mode == PR_MODE_HTTP)
+	if (fe->mode == PR_MODE_HTTP) {
 		s->req.flags |= CF_READ_DONTWAIT; /* one read is usually enough */
+		if (alpn_len == 2 && alpn_str && alpn_str[0] == 'h' && alpn_str[1] == '2') {
+			fprintf(stderr, "H2 requested!\n");
+			if (!h2c_frt_init(s))
+				goto out_return;
+			return 1;
+		}
+	}
 
 	if (unlikely(fe->nb_req_cap > 0)) {
 		if ((s->req_cap = pool_alloc2(fe->req_cap_pool)) == NULL)
