@@ -39,6 +39,7 @@
 #include <proto/frontend.h>
 #include <proto/log.h>
 #include <proto/proto_tcp.h>
+#include <proto/proto_h2.h>
 #include <proto/proto_http.h>
 #include <proto/proxy.h>
 #include <proto/stream.h>
@@ -48,6 +49,22 @@
 
 static void h2c_frt_io_handler(struct appctx *appctx);
 
+static const char h2_conn_preface[24] = // PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n
+	"\x50\x52\x49\x20\x2a\x20\x48\x54"
+	"\x54\x50\x2f\x32\x2e\x30\x0d\x0a"
+	"\x0d\x0a\x53\x4d\x0d\x0a\x0d\x0a";
+
+const char *h2_ft_strings[H2_FT_ENTRIES] = {
+	[H2_FT_DATA]          = "DATA",
+	[H2_FT_HEADERS]       = "HEADERS",
+	[H2_FT_PRIORITY]      = "PRIORITY",
+	[H2_FT_RST_STREAM]    = "RST_STREAM",
+	[H2_FT_SETTINGS]      = "SETTINGS",
+	[H2_FT_PUSH_PROMISE]  = "PUSH_PROMISE",
+	[H2_FT_PING]          = "PING",
+	[H2_FT_GOAWAY]        = "GOAWAY",
+	[H2_FT_WINDOW_UPDATE] =	"WINDOW_UPDATE",
+};
 
 struct applet h2c_frt_applet = {
 	.obj_type = OBJ_TYPE_APPLET,
@@ -69,26 +86,73 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 	struct channel *res = si_ic(si);
 	struct chunk *temp = NULL;
 	int reql;
+	int flen, ftype, sid;
 
 	if (unlikely(si->state == SI_ST_DIS || si->state == SI_ST_CLO))
 		goto out;
 
 	temp = get_trash_chunk();
 
-	while ((reql = bo_getline(req, temp->str, temp->size)) > 0) {
-		fprintf(stderr, "Request received: %d bytes :\n", reql);
-		debug_hexdump(stderr, "[H2RD] ]", temp->str, 0, reql);
-		fprintf(stderr, "--------------\n");
-		bo_skip(req, reql);
+	if (appctx->st0 == H2_CS_INIT) {
+		fprintf(stderr, "[%d] H2: first call\n", appctx->st0);
+		appctx->st0 = H2_CS_PREFACE;
 	}
-	/* closed or EOL not found */
 
+	if (appctx->st0 == H2_CS_PREFACE) {
+		reql = bo_getblk(req, temp->str, sizeof(h2_conn_preface), 0);
+		if (reql <= 0)
+			goto stop;
+
+		if (reql != sizeof(h2_conn_preface) ||
+		    memcmp(temp->str, h2_conn_preface, sizeof(h2_conn_preface)) != 0) {
+			fprintf(stderr, "[%d] Received bad preface (%d bytes) :\n", appctx->st0, reql);
+			debug_hexdump(stderr, "[H2RD] ", temp->str, 0, reql);
+			fprintf(stderr, "--------------\n");
+			si_shutr(si);
+			res->flags |= CF_READ_NULL;
+			si_shutw(si);
+			goto stop;
+		}
+
+		bo_skip(req, reql);
+		fprintf(stderr, "[%d] H2: preface found (%d bytes)!\n", appctx->st0, reql);
+		appctx->st0 = H2_CS_SETTINGS1;
+	}
+
+	if ((reql = bo_getblk(req, temp->str, req->buf->o, 0)) > 0) {
+		fprintf(stderr, "[%d] -- Request received: %d bytes ---\n", appctx->st0, reql);
+		debug_hexdump(stderr, "[H2RD] ", temp->str, 0, reql);
+		fprintf(stderr, "----------------------------\n");
+	}
+
+	while ((reql = h2_get_frame(req, &flen, &ftype, &sid)) > 0) {
+		fprintf(stderr, "[%d] Received frame of %d bytes, flags %02x, type %d (%s), sid %d\n",
+			appctx->st0, flen, ftype >> 8, ftype, h2_ft_str(ftype), sid);
+
+		if ((bo_getblk(req, temp->str, flen, 0)) > 0) {
+			fprintf(stderr, "[%d] Frame payload: %d bytes :\n", appctx->st0, flen);
+			debug_hexdump(stderr, "[H2RD] ", temp->str, 0, flen);
+			fprintf(stderr, "--------------\n");
+		}
+		bo_skip(req, flen);
+	}
+
+	//while ((reql = bo_getline(req, temp->str, temp->size)) > 0) {
+	//	fprintf(stderr, "[%d] Request received: %d bytes :\n", appctx->st0, reql);
+	//	debug_hexdump(stderr, temp->str, 0, reql);
+	//	fprintf(stderr, "--------------\n");
+	//	bo_skip(req, reql);
+	//}
+
+
+ stop:
+	/* closed or EOL not found */
 	if (reql < 0) { // closed
 		fprintf(stderr, "Closed!\n");
 		si_shutw(si);
 	}
 
-out:
+ out:
 	//if ((res->flags & CF_SHUTR) && (si->state == SI_ST_EST)) {
 	//	DPRINTF(stderr, "%s@%d: si to buf closed. req=%08x, res=%08x, st=%d\n",
 	//		__FUNCTION__, __LINE__, req->flags, res->flags, si->state);
@@ -132,6 +196,7 @@ int h2c_frt_init(struct stream *s)
 	/* Initialise the context. */
 	appctx = si_appctx(&s->si[1]);
 	memset(&appctx->ctx, 0, sizeof(appctx->ctx));
+	appctx->st0 = H2_CS_INIT;
 
 	/* Now we can schedule the applet. */
 	si_applet_cant_get(&s->si[1]);
