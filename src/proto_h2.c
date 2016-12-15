@@ -90,7 +90,6 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 	struct channel *res = si_ic(si);
 	struct chunk *temp = NULL;
 	int reql;
-	int flen, ftype, sid;
 
 	if (unlikely(si->state == SI_ST_DIS || si->state == SI_ST_CLO))
 		goto out;
@@ -129,16 +128,18 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		fprintf(stderr, "----------------------------\n");
 	}
 
-	while ((reql = h2_get_frame(req, &flen, &ftype, &sid)) > 0) {
-		fprintf(stderr, "[%d] Received frame of %d bytes, flags %02x, type %d (%s), sid %d\n",
-			appctx->st0, flen, ftype >> 8, ftype, h2_ft_str(ftype), sid);
+	while ((reql = h2_get_frame(req, &appctx->ctx.h2c.ctx->dfl, &appctx->ctx.h2c.ctx->dft, &appctx->ctx.h2c.ctx->dsi)) > 0) {
+		fprintf(stderr, "[%d] Received frame of %d bytes, type %d (%s), flags %02x, sid %d\n",
+		        appctx->st0, appctx->ctx.h2c.ctx->dfl,
+			appctx->ctx.h2c.ctx->dft & 0xff, h2_ft_str(appctx->ctx.h2c.ctx->dft),
+			appctx->ctx.h2c.ctx->dft >> 8, appctx->ctx.h2c.ctx->dsi);
 
-		if ((bo_getblk(req, temp->str, flen, 0)) > 0) {
-			fprintf(stderr, "[%d] Frame payload: %d bytes :\n", appctx->st0, flen);
-			debug_hexdump(stderr, "[H2RD] ", temp->str, 0, flen);
+		if ((bo_getblk(req, temp->str, appctx->ctx.h2c.ctx->dfl, 0)) > 0) {
+			fprintf(stderr, "[%d] Frame payload: %d bytes :\n", appctx->st0, appctx->ctx.h2c.ctx->dfl);
+			debug_hexdump(stderr, "[H2RD] ", temp->str, 0, appctx->ctx.h2c.ctx->dfl);
 			fprintf(stderr, "--------------\n");
 		}
-		bo_skip(req, flen);
+		bo_skip(req, appctx->ctx.h2c.ctx->dfl);
 	}
 
 	//while ((reql = bo_getline(req, temp->str, temp->size)) > 0) {
