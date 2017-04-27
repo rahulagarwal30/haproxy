@@ -48,6 +48,7 @@
 
 
 static void h2c_frt_io_handler(struct appctx *appctx);
+static void h2c_frt_release_handler(struct appctx *appctx);
 
 struct pool_head *pool2_h2c;
 struct pool_head *pool2_h2s;
@@ -73,7 +74,7 @@ struct applet h2c_frt_applet = {
 	.obj_type = OBJ_TYPE_APPLET,
 	.name = "<H2CFRT>", /* used for logging */
 	.fct = h2c_frt_io_handler,
-	.release = NULL,
+	.release = h2c_frt_release_handler,
 };
 
 
@@ -180,12 +181,23 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 	return;
 }
 
+static void h2c_frt_release_handler(struct appctx *appctx)
+{
+	pool_free2(pool2_h2c, appctx->ctx.h2c.ctx);
+	appctx->ctx.h2c.ctx = NULL;
+}
+
 /* tries to initialize the front H2 applet and returns non-zero, or fails and
  * returns zero.
  */
 int h2c_frt_init(struct stream *s)
 {
 	struct appctx *appctx;
+	struct h2c *h2c;
+
+	h2c = pool_alloc2(pool2_h2c);
+	if (!h2c)
+		goto fail;
 
 	s->target = &h2c_frt_applet.obj_type;
 	if (unlikely(!stream_int_register_handler(&s->si[1], objt_applet(s->target)))) {
@@ -193,13 +205,16 @@ int h2c_frt_init(struct stream *s)
 		// impossible to return an error on the connection here
 		if (!(s->flags & SF_ERR_MASK))
 			s->flags |= SF_ERR_RESOURCE;
-		return 0;
+		goto fail;
 	}
 
 	/* Initialise the context. */
 	appctx = si_appctx(&s->si[1]);
 	memset(&appctx->ctx, 0, sizeof(appctx->ctx));
 	appctx->st0 = H2_CS_INIT;
+	appctx->ctx.h2c.ctx = h2c;
+	h2c->appctx = appctx;
+	h2c->max_id = 0;
 
 	/* Now we can schedule the applet. */
 	si_applet_cant_get(&s->si[1]);
@@ -216,6 +231,9 @@ int h2c_frt_init(struct stream *s)
 	channel_forward_forever(&s->req);
 	channel_forward_forever(&s->res);
 	return 1;
+ fail:
+	pool_free2(pool2_h2c, h2c);
+	return 0;
 }
 
 __attribute__((constructor))
