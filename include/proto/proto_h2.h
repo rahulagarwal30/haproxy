@@ -68,6 +68,18 @@ static inline int h2_get_frame(struct channel *chn, int *len, int *type, int *si
 	return 1;
 }
 
+/* returns the frame type without the flags */
+static inline int h2_ft(int type)
+{
+	return type & 0xff;
+}
+
+/* returns the frame flags without the type */
+static inline int h2_ff(int type)
+{
+	return (type >> 8) & 0xff;
+}
+
 /* returns a const string giving the name of frame type <type>. It may contain
  * the flags which are ignored.
  */
