@@ -75,6 +75,19 @@ enum h2_ft {
 // RFC7540 #6.8 : GOAWAY defines no flags
 // RFC7540 #6.9 : WINDOW_UPDATE defines no flags
 
+/* H2 connection descriptor */
+struct h2c {
+	struct appctx *appctx;
+	int32_t max_id; /* highest ID known on this connection */
+};
+
+/* H2 stream descriptor */
+struct h2s {
+	struct appctx *appctx;
+	struct h2c *h2c;
+	int32_t id; /* stream ID */
+};
+
 #endif /* _TYPES_PROTO_H2_H */
 
 /*
