@@ -49,6 +49,9 @@
 
 static void h2c_frt_io_handler(struct appctx *appctx);
 
+struct pool_head *pool2_h2c;
+struct pool_head *pool2_h2s;
+
 static const char h2_conn_preface[24] = // PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n
 	"\x50\x52\x49\x20\x2a\x20\x48\x54"
 	"\x54\x50\x2f\x32\x2e\x30\x0d\x0a"
@@ -213,4 +216,11 @@ int h2c_frt_init(struct stream *s)
 	channel_forward_forever(&s->req);
 	channel_forward_forever(&s->res);
 	return 1;
+}
+
+__attribute__((constructor))
+static void __h2_init(void)
+{
+	pool2_h2c = create_pool("h2c", sizeof(struct h2c), MEM_F_SHARED);
+	pool2_h2s = create_pool("h2s", sizeof(struct h2s), MEM_F_SHARED);
 }
