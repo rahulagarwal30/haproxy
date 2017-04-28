@@ -215,6 +215,8 @@ int h2c_frt_init(struct stream *s)
 	appctx->ctx.h2c.ctx = h2c;
 	h2c->appctx = appctx;
 	h2c->max_id = 0;
+	h2c->dsi = -1;
+	h2c->msi = -1;
 
 	/* Now we can schedule the applet. */
 	si_applet_cant_get(&s->si[1]);

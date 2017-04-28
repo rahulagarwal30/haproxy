@@ -79,6 +79,16 @@ enum h2_ft {
 struct h2c {
 	struct appctx *appctx;
 	int32_t max_id; /* highest ID known on this connection */
+
+	/* states for the demux direction */
+	int dsi; /* demux stream ID (<0 = idle) */
+	int dfl; /* demux frame length (if dsi >= 0) */
+	int dft; /* demux frame type (+ flags) (if dsi >= 0) */
+
+	/* states for the mux direction */
+	int msi; /* mux stream ID (<0 = idle) */
+	int mfl; /* mux frame length (if dsi >= 0) */
+	int mft; /* mux frame type (+ flags) (if dsi >= 0) */
 };
 
 /* H2 stream descriptor */
