@@ -292,6 +292,16 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			fprintf(stderr, " [weight=%d] ", (unsigned char)temp->str[4]);
 			fprintf(stderr, "\n");
 			break;
+
+		case H2_FT_HEADERS:
+			if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM)
+				fprintf(stderr, "[%d] HEADERS with END_STREAM\n", appctx->st0);
+			if (h2_ff(h2c->dft) & H2_F_HEADERS_END_HEADERS)
+				fprintf(stderr, "[%d] HEADERS with END_HEADERS\n", appctx->st0);
+			if (h2_ff(h2c->dft) & H2_F_HEADERS_PADDED)
+				fprintf(stderr, "[%d] HEADERS with PADDED\n", appctx->st0);
+			if (h2_ff(h2c->dft) & H2_F_HEADERS_PRIORITY)
+				fprintf(stderr, "[%d] HEADERS with PRIORITY\n", appctx->st0);
 		}
 
 		if (!ret)
