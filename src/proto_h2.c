@@ -78,6 +78,37 @@ struct applet h2c_frt_applet = {
 };
 
 
+/* try to send a settings frame on the connection. Returns 0 if not possible
+ * yet, <0 on error, >0 on success.
+ */
+static int h2c_frt_snd_settings(struct h2c *h2c)
+{
+	struct appctx *appctx = h2c->appctx;
+	struct stream_interface *si = appctx->owner;
+	struct channel *res = si_ic(si);
+	int ret = -1;
+
+	if (h2c_mux_busy(h2c))
+		goto end;
+
+	if ((res->buf == &buf_empty) &&
+	    !channel_alloc_buffer(res, &appctx->buffer_wait)) {
+		si_applet_cant_put(si);
+		goto end;
+	}
+
+	ret = bi_putblk(res,
+			"\x00\x00\x00"     /* length : 0 (no data)  */
+			"\x04" "\x00"      /* type   : 4, flags : 0 */
+			"\x00\x00\x00\x00" /* stream ID */, 9);
+
+ end:
+	fprintf(stderr, "[%d] sent settings = %d\n", appctx->st0, ret);
+
+	/* success: >= 0 ; wait: -1; failure: < -1 */
+	return ret + 1;
+}
+
 /* This I/O handler runs as an applet embedded in a stream interface. It is
  * used to send HTTP stats over a TCP socket. The mechanism is very simple.
  * appctx->st0 contains the operation in progress (dump, done). The handler
@@ -86,10 +117,12 @@ struct applet h2c_frt_applet = {
 static void h2c_frt_io_handler(struct appctx *appctx)
 {
 	struct stream_interface *si = appctx->owner;
+	struct h2c *h2c = appctx->ctx.h2c.ctx;
 	struct channel *req = si_oc(si);
 	struct channel *res = si_ic(si);
 	struct chunk *temp = NULL;
 	int reql;
+	int ret;
 
 	if (unlikely(si->state == SI_ST_DIS || si->state == SI_ST_CLO))
 		goto out;
@@ -98,6 +131,11 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 
 	if (appctx->st0 == H2_CS_INIT) {
 		fprintf(stderr, "[%d] H2: first call\n", appctx->st0);
+		ret = h2c_frt_snd_settings(h2c);
+		if (!ret)
+			goto stop;
+		if (ret < 0)
+			goto fail;
 		appctx->st0 = H2_CS_PREFACE;
 	}
 
@@ -179,6 +217,11 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		si_shutr(si);
 		res->flags |= CF_READ_NULL;
 	}
+	return;
+
+ fail:
+	si_shutr(si);
+	si_shutw(si);
 	return;
 }
 

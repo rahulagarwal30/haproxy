@@ -91,6 +91,12 @@ static inline const char *h2_ft_str(int type)
 	return h2_ft_strings[type];
 }
 
+/* returns true of the mux is currently busy */
+static inline int h2c_mux_busy(const struct h2c *h2c)
+{
+	return h2c->msi >= 0;
+}
+
 #endif /* _PROTO_PROTO_H2_H */
 
 /*
