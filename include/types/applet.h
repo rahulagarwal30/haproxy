@@ -151,6 +151,12 @@ struct appctx {
 			struct task *task;
 			struct hlua_function *fcn;
 		} hlua_cli;
+		struct {
+			struct h2c *ctx;        /* HTTP/2 connection context (H2 side) */
+		} h2c;
+		struct {
+			struct h2s *ctx;        /* HTTP/2 stream context (H1 side) */
+		} h2s;
 		/* NOTE: please add regular applet contexts (ie: not
 		 * CLI-specific ones) above, before "cli".
 		 */
