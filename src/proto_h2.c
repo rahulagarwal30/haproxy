@@ -109,6 +109,70 @@ static int h2c_frt_snd_settings(struct h2c *h2c)
 	return ret + 1;
 }
 
+/* try to send an ACK for a settings frame on the connection. Returns 0 if not
+ * possible yet, <0 on error, >0 on success.
+ */
+static int h2c_frt_ack_settings(struct h2c *h2c)
+{
+	struct appctx *appctx = h2c->appctx;
+	struct stream_interface *si = appctx->owner;
+	struct channel *res = si_ic(si);
+	int ret = -1;
+
+	if (h2c_mux_busy(h2c))
+		goto end;
+
+	if ((res->buf == &buf_empty) &&
+	    !channel_alloc_buffer(res, &appctx->buffer_wait)) {
+		si_applet_cant_put(si);
+		goto end;
+	}
+
+	ret = bi_putblk(res,
+			"\x00\x00\x00"     /* length : 0 (no data)  */
+			"\x04" "\x01"      /* type   : 4, flags : ACK */
+			"\x00\x00\x00\x00" /* stream ID */, 9);
+
+ end:
+	fprintf(stderr, "[%d] sent settings ACK = %d\n", appctx->st0, ret);
+
+	/* success: >= 0 ; wait: -1; failure: < -1 */
+	return ret + 1;
+}
+
+/* try to send an ACK for a ping frame on the connection. Returns 0 if not
+ * possible yet, <0 on error, >0 on success.
+ */
+static int h2c_frt_ack_ping(struct h2c *h2c, const char *payload)
+{
+	struct appctx *appctx = h2c->appctx;
+	struct stream_interface *si = appctx->owner;
+	struct channel *res = si_ic(si);
+	char str[17];
+	int ret = -1;
+
+	if (h2c_mux_busy(h2c))
+		goto end;
+
+	if ((res->buf == &buf_empty) &&
+	    !channel_alloc_buffer(res, &appctx->buffer_wait)) {
+		si_applet_cant_put(si);
+		goto end;
+	}
+
+	memcpy(str,
+	       "\x00\x00\x08"     /* length : 8 (same payload) */
+	       "\x06" "\x01"      /* type   : 6, flags : ACK   */
+	       "\x00\x00\x00\x00" /* stream ID */, 9);
+	memcpy(str + 9, payload, 8);
+	ret = bi_putblk(res, str, 17);
+ end:
+	fprintf(stderr, "[%d] sent settings ACK = %d\n", appctx->st0, ret);
+
+	/* success: >= 0 ; wait: -1; failure: < -1 */
+	return ret + 1;
+}
+
 /* This I/O handler runs as an applet embedded in a stream interface. It is
  * used to send HTTP stats over a TCP socket. The mechanism is very simple.
  * appctx->st0 contains the operation in progress (dump, done). The handler
@@ -133,7 +197,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		fprintf(stderr, "[%d] H2: first call\n", appctx->st0);
 		ret = h2c_frt_snd_settings(h2c);
 		if (!ret)
-			goto stop;
+			goto out;
 		if (ret < 0)
 			goto fail;
 		appctx->st0 = H2_CS_PREFACE;
@@ -141,8 +205,10 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 
 	if (appctx->st0 == H2_CS_PREFACE) {
 		reql = bo_getblk(req, temp->str, sizeof(h2_conn_preface), 0);
-		if (reql <= 0)
-			goto stop;
+		if (reql < 0)
+			goto fail;
+		if (reql == 0)
+			goto out;
 
 		if (reql != sizeof(h2_conn_preface) ||
 		    memcmp(temp->str, h2_conn_preface, sizeof(h2_conn_preface)) != 0) {
@@ -152,7 +218,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			si_shutr(si);
 			res->flags |= CF_READ_NULL;
 			si_shutw(si);
-			goto stop;
+			goto out;
 		}
 
 		bo_skip(req, reql);
@@ -160,53 +226,74 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		appctx->st0 = H2_CS_SETTINGS1;
 	}
 
-	if ((reql = bo_getblk(req, temp->str, req->buf->o, 0)) > 0) {
-		fprintf(stderr, "[%d] -- Request received: %d bytes ---\n", appctx->st0, reql);
-		debug_hexdump(stderr, "[H2RD] ", temp->str, 0, reql);
-		fprintf(stderr, "----------------------------\n");
-	}
+	while (1) {
+		if (h2c->dsi < 0) {
+			/* we need to read a new frame */
 
-	while ((reql = h2_get_frame(req, &appctx->ctx.h2c.ctx->dfl, &appctx->ctx.h2c.ctx->dft, &appctx->ctx.h2c.ctx->dsi)) > 0) {
-		fprintf(stderr, "[%d] Received frame of %d bytes, type %d (%s), flags %02x, sid %d\n",
-		        appctx->st0, appctx->ctx.h2c.ctx->dfl,
-			appctx->ctx.h2c.ctx->dft & 0xff, h2_ft_str(appctx->ctx.h2c.ctx->dft),
-			appctx->ctx.h2c.ctx->dft >> 8, appctx->ctx.h2c.ctx->dsi);
+			/* just for debugging */
+			if ((reql = bo_getblk(req, temp->str, req->buf->o, 0)) > 0) {
+				fprintf(stderr, "[%d] -- %d bytes received ---\n", appctx->st0, reql);
+				debug_hexdump(stderr, "[H2RD] ", temp->str, 0, reql);
+				fprintf(stderr, "----------------------------\n");
+			}
 
-		if ((bo_getblk(req, temp->str, appctx->ctx.h2c.ctx->dfl, 0)) > 0) {
-			fprintf(stderr, "[%d] Frame payload: %d bytes :\n", appctx->st0, appctx->ctx.h2c.ctx->dfl);
-			debug_hexdump(stderr, "[H2RD] ", temp->str, 0, appctx->ctx.h2c.ctx->dfl);
+			reql = h2_get_frame(req, &h2c->dfl, &h2c->dft, &h2c->dsi);
+			if (reql < 0)
+				goto fail;
+			if (reql == 0)
+				goto out;
+
+			fprintf(stderr, "[%d] Received frame of %d bytes, type %d (%s), flags %02x, sid %d\n",
+				appctx->st0, h2c->dfl,
+				h2c->dft & 0xff, h2_ft_str(h2c->dft),
+				h2c->dft >> 8, h2c->dsi);
+
+			if (unlikely(appctx->st0 == H2_CS_SETTINGS1)) {
+				// supports a single frame type here
+				if (h2_ft(h2c->dft) != H2_FT_SETTINGS ||
+				    (h2_ff(h2c->dft) & H2_F_SETTINGS_ACK))
+					goto fail;
+				appctx->st0 = H2_CS_FRAME;
+			}
+		}
+
+		/* read the incoming frame into temp->str. FIXME: for now we don't check the
+		 * frame length but it's limited by the fact that we read into a trash buffer.
+		 */
+		if ((bo_getblk(req, temp->str, h2c->dfl, 0)) > 0) {
+			fprintf(stderr, "[%d] Frame payload: %d bytes :\n", appctx->st0, h2c->dfl);
+			debug_hexdump(stderr, "[H2RD] ", temp->str, 0, h2c->dfl);
 			fprintf(stderr, "--------------\n");
 		}
-		bo_skip(req, appctx->ctx.h2c.ctx->dfl);
-	}
 
-	//while ((reql = bo_getline(req, temp->str, temp->size)) > 0) {
-	//	fprintf(stderr, "[%d] Request received: %d bytes :\n", appctx->st0, reql);
-	//	debug_hexdump(stderr, temp->str, 0, reql);
-	//	fprintf(stderr, "--------------\n");
-	//	bo_skip(req, reql);
-	//}
+		ret = 1; // assume success for frames that we ignore. 0=yield, <0=fail.
+		switch (h2_ft(h2c->dft)) {
+		case H2_FT_SETTINGS:
+			if (!(h2_ff(h2c->dft) & H2_F_SETTINGS_ACK))
+				ret = h2c_frt_ack_settings(h2c);
+			break;
 
+		case H2_FT_PING:
+			/* frame length must be exactly 8 */
+			if (h2c->dfl != 8)
+				goto fail;
 
- stop:
-	/* closed or EOL not found */
-	if (reql < 0) { // closed
-		fprintf(stderr, "Closed!\n");
-		si_shutw(si);
+			if (!(h2_ff(h2c->dft) & H2_F_PING_ACK))
+				ret = h2c_frt_ack_ping(h2c, temp->str);
+			break;
+		}
+
+		if (!ret)
+			goto out;
+
+		if (ret < 0)
+			goto fail;
+
+		bo_skip(req, h2c->dfl);
+		h2c->dsi = -1;
 	}
 
  out:
-	//if ((res->flags & CF_SHUTR) && (si->state == SI_ST_EST)) {
-	//	DPRINTF(stderr, "%s@%d: si to buf closed. req=%08x, res=%08x, st=%d\n",
-	//		__FUNCTION__, __LINE__, req->flags, res->flags, si->state);
-	//	/* Other side has closed, let's abort if we have no more processing to do
-	//	 * and nothing more to consume. This is comparable to a broken pipe, so
-	//	 * we forward the close to the request side so that it flows upstream to
-	//	 * the client.
-	//	 */
-	//	si_shutw(si);
-	//}
-
 	if ((req->flags & CF_SHUTW) && (si->state == SI_ST_EST) /*&& (appctx->st0 < CLI_ST_OUTPUT)*/) {
 		DPRINTF(stderr, "%s@%d: buf to si closed. req=%08x, res=%08x, st=%d\n",
 			__FUNCTION__, __LINE__, req->flags, res->flags, si->state);
