@@ -281,6 +281,17 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			if (!(h2_ff(h2c->dft) & H2_F_PING_ACK))
 				ret = h2c_frt_ack_ping(h2c, temp->str);
 			break;
+
+		case H2_FT_PRIORITY:
+			fprintf(stderr, "   ");
+			if (temp->str[0] & 0x80)
+				fprintf(stderr, " [EXCLUSIVE] ");
+
+			fprintf(stderr, " [dep=%d] ", ((temp->str[0] & 0x7f)<<24) + ((unsigned char)temp->str[1] << 16) + ((unsigned char)temp->str[2] << 8) + (unsigned char)temp->str[3]);
+
+			fprintf(stderr, " [weight=%d] ", (unsigned char)temp->str[4]);
+			fprintf(stderr, "\n");
+			break;
 		}
 
 		if (!ret)
