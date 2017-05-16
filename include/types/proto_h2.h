@@ -75,6 +75,11 @@ enum h2_ft {
 	H2_FT_ENTRIES /* must be last */
 };
 
+/* Connection flags (32 bit), in h2c->flags */
+#define H2_CF_NONE              0x00000000
+#define H2_CF_BUFFER_FULL       0x00000001  // connection's buffer was full
+
+
 /* flags defined for each frame type */
 
 // RFC7540 #6.1
@@ -108,6 +113,7 @@ struct h2c {
 	struct eb_root streams_by_id; /* all active streams by their ID */
 	struct list active_list; /* list of active streams currently blocked */
 	int32_t max_id; /* highest ID known on this connection */
+	uint32_t flags; /* connection flags: H2_CF_* */
 
 	/* states for the demux direction */
 	int dsi; /* demux stream ID (<0 = idle) */

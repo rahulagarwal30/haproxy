@@ -282,6 +282,8 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 
 	temp = get_trash_chunk();
 
+	h2c->flags &= ~H2_CF_BUFFER_FULL;
+
 	if (appctx->st0 == H2_CS_INIT) {
 		fprintf(stderr, "[%d] H2: first call\n", appctx->st0);
 		ret = h2c_frt_snd_settings(h2c);
@@ -437,8 +439,10 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			break;
 		}
 
-		if (!ret)
+		if (!ret) {
+			h2c->flags |= H2_CF_BUFFER_FULL;
 			goto out;
+		}
 
 		if (ret < 0)
 			goto fail;
@@ -511,6 +515,7 @@ int h2c_frt_init(struct stream *s)
 	appctx->ctx.h2c.ctx = h2c;
 	h2c->appctx = appctx;
 	h2c->max_id = 0;
+	h2c->flags = H2_CF_NONE;
 	h2c->dsi = -1;
 	h2c->msi = -1;
 	h2c->streams_by_id = EB_ROOT_UNIQUE;
