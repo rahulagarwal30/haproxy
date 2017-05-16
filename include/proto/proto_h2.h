@@ -86,6 +86,29 @@ static inline int h2_ff(int type)
 	return (type >> 8) & 0xff;
 }
 
+/* writes 32-bit value <v> at position <str> in big-endian encoding. The caller
+ * guarantees there is enough room.
+ */
+static inline void h2_u32_encode(void *str, uint32_t v)
+{
+#if defined(__x86_64__) ||                                              \
+    defined(__i386__) || defined(__i486__) || defined(__i586__) || defined(__i686__) || \
+    defined(__ARM_ARCH_7A__)
+	/* unaligned accesses are OK */
+	uint32_t *out = str;
+	*out = htonl(v);
+#else
+	/* no unaligned accesses */
+	uint8_t *out = str;
+	uint16_t vh = v >> 16; // help the compiler
+
+	out[3] = v;
+	out[1] = vh;
+	out[2] = v >> 8;
+	out[0] = vh >> 8;
+#endif
+}
+
 /* returns a const string giving the name of frame type <type>. It may contain
  * the flags which are ignored.
  */
