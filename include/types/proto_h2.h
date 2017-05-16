@@ -54,6 +54,14 @@ enum h2_ss {
 #define H2_RST_SENT             2 // sent RST_STREAM
 #define H2_RST_BOTH             3 // sent and received RST_STREAM
 
+/* H2 stream blocking reasons, in h2s->blocked */
+enum h2s_blocked_reason {
+	H2_BLK_NONE      = 0, // not blocked, not in any list
+	H2_BLK_CANT      = 1, // can't send now ; in active list
+	H2_BLK_FCTL_CONN = 2, // blocked by connection's fctl
+	H2_BLK_FCTL_STRM = 3, // blocked by stream's fctl
+} __attribute__((packed));
+
 enum h2_ft {
 	H2_FT_DATA            = 0x00,     // RFC7540 #6.1
 	H2_FT_HEADERS         = 0x01,     // RFC7540 #6.2
@@ -98,6 +106,7 @@ enum h2_ft {
 struct h2c {
 	struct appctx *appctx;
 	struct eb_root streams_by_id; /* all active streams by their ID */
+	struct list active_list; /* list of active streams currently blocked */
 	int32_t max_id; /* highest ID known on this connection */
 
 	/* states for the demux direction */
@@ -116,10 +125,12 @@ struct h2s {
 	struct appctx *appctx;
 	struct h2c *h2c;
 	struct eb32_node by_id; /* place in h2c's streams_by_id */
+	struct list list; /* position in active/blocked lists if blocked>0 */
 	int32_t id; /* stream ID */
 	enum h2_ss st;
 	uint8_t rst;
-	/* two unused bytes here */
+	enum h2s_blocked_reason blocked;
+	/* one unused byte here */
 };
 
 #endif /* _TYPES_PROTO_H2_H */
