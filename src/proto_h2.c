@@ -230,6 +230,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 	struct h2s *h2s;
 	int reql;
 	int ret;
+	int frame_len;
 
 	if (unlikely(si->state == SI_ST_DIS || si->state == SI_ST_CLO))
 		goto out;
@@ -303,12 +304,25 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		/* read the incoming frame into temp->str. FIXME: for now we don't check the
 		 * frame length but it's limited by the fact that we read into a trash buffer.
 		 */
-		if ((bo_getblk(req, temp->str, h2c->dfl, 0)) > 0) {
+		frame_len = bo_getblk(req, temp->str, h2c->dfl, 0);
+		if (h2c->dfl && frame_len <= 0) {
+			if (frame_len < 0 || req->buf->o == req->buf->size) {
+				fprintf(stderr, "[%d] Truncated frame payload: %d/%d bytes read only\n", appctx->st0, req->buf->o, h2c->dfl);
+				goto fail;
+			}
+			fprintf(stderr, "[%d] Received incomplete frame (%d/%d bytes), waiting [cflags=0x%08x]\n", appctx->st0, req->buf->o, h2c->dfl, req->flags);
+			goto out;
+		}
+
+		if (frame_len > 0) {
 			fprintf(stderr, "[%d] Frame payload: %d bytes :\n", appctx->st0, h2c->dfl);
 			debug_hexdump(stderr, "[H2RD] ", temp->str, 0, h2c->dfl);
 			fprintf(stderr, "--------------\n");
 		}
 
+		/* FIXME: temporary measure. We at least need to ensure that
+		 * it's still possible to read more data.
+		 */
 		ret = 1; // assume success for frames that we ignore. 0=yield, <0=fail.
 		switch (h2_ft(h2c->dft)) {
 		case H2_FT_SETTINGS:
@@ -357,6 +371,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM)
 				h2s->st = H2_SS_HREM;
 			fprintf(stderr, " [newh2s=%p:%s]\n", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
+			break;
 
 		case H2_FT_DATA:
 			if (h2_ff(h2c->dft) & H2_F_DATA_END_STREAM)
@@ -370,6 +385,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			if (h2s->st == H2_SS_OPEN && (h2_ff(h2c->dft) & H2_F_DATA_END_STREAM))
 				h2s->st = H2_SS_HREM;
 			fprintf(stderr, " [h2s=%p:%s]\n", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
+			break;
 		}
 
 		if (!ret)
@@ -378,7 +394,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		if (ret < 0)
 			goto fail;
 
-		bo_skip(req, h2c->dfl);
+		bo_skip(req, frame_len);
 		h2c->dsi = -1;
 	}
 
