@@ -33,6 +33,9 @@ extern const char *h2_ft_strings[H2_FT_ENTRIES];
 /* human-readable stream state names */
 extern const char *h2_ss_strings[H2_SS_ENTRIES];
 
+/* dummy streams returned for idle and closed states */
+extern const struct h2s *h2_closed_streams[4];
+extern const struct h2s *h2_idle_stream;
 
 int h2c_frt_init(struct stream *s);
 
@@ -114,9 +117,12 @@ static inline struct h2s *h2c_st_by_id(struct h2c *h2c, int id)
 	struct eb32_node *node;
 	struct h2s *h2s;
 
+	if (id > h2c->max_id)
+		return (struct h2s *)h2_idle_stream;
+
 	node = eb32_lookup(&h2c->streams_by_id, id);
 	if (!node)
-		return NULL;
+		return (struct h2s *)h2_closed_streams[0];
 
 	h2s = container_of(node, struct h2s, by_id);
 

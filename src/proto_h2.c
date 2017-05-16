@@ -87,6 +87,45 @@ struct applet h2c_frt_applet = {
 	.release = h2c_frt_release_handler,
 };
 
+/* 4 const streams for the 4 possible RST states */
+const struct h2s *h2_closed_streams[4] = {
+	&(const struct h2s){
+		.h2c       = NULL,
+		.appctx    = NULL,
+		.st        = H2_SS_CLOSED,
+		.rst       = 0,
+		.id        = 0,
+	},
+	&(const struct h2s){
+		.h2c       = NULL,
+		.appctx    = NULL,
+		.st        = H2_SS_CLOSED,
+		.rst       = 1,
+		.id        = 0,
+	},
+	&(const struct h2s){
+		.h2c       = NULL,
+		.appctx    = NULL,
+		.st        = H2_SS_CLOSED,
+		.rst       = 2,
+		.id        = 0,
+	},
+	&(const struct h2s){
+		.h2c       = NULL,
+		.appctx    = NULL,
+		.st        = H2_SS_CLOSED,
+		.rst       = 3,
+		.id        = 0,
+	},
+};
+
+const struct h2s *h2_idle_stream = &(const struct h2s){
+	.h2c       = NULL,
+	.appctx    = NULL,
+	.st        = H2_SS_IDLE,
+	.rst       = H2_RST_NONE,
+	.id        = 0,
+};
 
 /* try to send a settings frame on the connection. Returns 0 if not possible
  * yet, <0 on error, >0 on success.
@@ -353,7 +392,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			fprintf(stderr, " [weight=%d] ", (unsigned char)temp->str[4]);
 
 			h2s = h2c_st_by_id(h2c, h2c->dsi);
-			fprintf(stderr, " [h2s=%p:%s]", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
+			fprintf(stderr, " [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
 			fprintf(stderr, "\n");
 			break;
 
@@ -372,7 +411,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 				goto fail;
 			}
 			h2s = h2c_st_by_id(h2c, h2c->dsi);
-			fprintf(stderr, "    [h2s=%p:%s]", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
+			fprintf(stderr, "    [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
 
 			h2s = h2c_stream_new(h2c, h2c->dsi);
 			h2s->st = H2_SS_OPEN;
@@ -388,11 +427,11 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 				fprintf(stderr, "[%d] DATA with PADDED\n", appctx->st0);
 
 			h2s = h2c_st_by_id(h2c, h2c->dsi);
-			fprintf(stderr, "    [h2s=%p:%s]", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
+			fprintf(stderr, "    [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
 
 			if (h2s->st == H2_SS_OPEN && (h2_ff(h2c->dft) & H2_F_DATA_END_STREAM))
 				h2s->st = H2_SS_HREM;
-			fprintf(stderr, " [h2s=%p:%s]\n", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
+			fprintf(stderr, " [h2s=%p:%s]\n", h2s, h2_ss_str(h2s->st));
 			break;
 		}
 
