@@ -183,6 +183,38 @@ static int h2c_frt_ack_ping(struct h2c *h2c, const char *payload)
 	return ret + 1;
 }
 
+/* creates a new stream <id> on the h2c connection and returns it, or NULL in
+ * case of memory allocation error.
+ */
+static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
+{
+	struct h2s *h2s;
+
+	/* DEBUG CODE */
+	struct eb32_node *node = eb32_lookup(&h2c->streams_by_id, id);
+	if (node) {
+		h2s = container_of(node, struct h2s, by_id);
+		fprintf(stderr, "%s:%d(%s): BUG!: h2c=%p id=%d ret=%p id=%d\n", __FILE__, __LINE__, __FUNCTION__, h2c, id, h2s, id);
+	}
+
+	if (!id)
+		fprintf(stderr, "%s:%d(%s): BUG!: h2c=%p id=%d\n", __FILE__, __LINE__, __FUNCTION__, h2c, id);
+	/* /DEBUG */
+
+	h2s = pool_alloc2(pool2_h2s);
+	if (!h2s)
+		goto out;
+
+	h2s->h2c       = h2c;
+	h2s->appctx    = h2c->appctx;
+	h2s->st        = H2_SS_IDLE;
+	h2s->rst       = H2_RST_NONE;
+	h2s->by_id.key = h2s->id = id;
+	eb32_insert(&h2c->streams_by_id, &h2s->by_id);
+ out:
+	return h2s;
+}
+
 /* This I/O handler runs as an applet embedded in a stream interface. It is
  * used to send HTTP stats over a TCP socket. The mechanism is very simple.
  * appctx->st0 contains the operation in progress (dump, done). The handler
@@ -195,6 +227,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 	struct channel *req = si_oc(si);
 	struct channel *res = si_ic(si);
 	struct chunk *temp = NULL;
+	struct h2s *h2s;
 	int reql;
 	int ret;
 
@@ -300,6 +333,9 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			fprintf(stderr, " [dep=%d] ", ((temp->str[0] & 0x7f)<<24) + ((unsigned char)temp->str[1] << 16) + ((unsigned char)temp->str[2] << 8) + (unsigned char)temp->str[3]);
 
 			fprintf(stderr, " [weight=%d] ", (unsigned char)temp->str[4]);
+
+			h2s = h2c_st_by_id(h2c, h2c->dsi);
+			fprintf(stderr, " [h2s=%p:%s]", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
 			fprintf(stderr, "\n");
 			break;
 
@@ -312,6 +348,15 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 				fprintf(stderr, "[%d] HEADERS with PADDED\n", appctx->st0);
 			if (h2_ff(h2c->dft) & H2_F_HEADERS_PRIORITY)
 				fprintf(stderr, "[%d] HEADERS with PRIORITY\n", appctx->st0);
+
+			h2s = h2c_st_by_id(h2c, h2c->dsi);
+			fprintf(stderr, "    [h2s=%p:%s]", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
+
+			h2s = h2c_stream_new(h2c, h2c->dsi);
+			h2s->st = H2_SS_OPEN;
+			if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM)
+				h2s->st = H2_SS_HREM;
+			fprintf(stderr, " [newh2s=%p:%s]\n", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
 		}
 
 		if (!ret)
@@ -345,7 +390,18 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 
 static void h2c_frt_release_handler(struct appctx *appctx)
 {
-	pool_free2(pool2_h2c, appctx->ctx.h2c.ctx);
+	struct h2c *h2c = appctx->ctx.h2c.ctx;
+	struct h2s *h2s;
+	struct eb32_node *node;
+
+	node = eb32_first(&h2c->streams_by_id);
+	while (node) {
+		h2s = container_of(node, struct h2s, by_id);
+		node = eb32_next(node);
+		pool_free2(pool2_h2s, h2s);
+	}
+
+	pool_free2(pool2_h2c, h2c);
 	appctx->ctx.h2c.ctx = NULL;
 }
 
@@ -379,6 +435,7 @@ int h2c_frt_init(struct stream *s)
 	h2c->max_id = 0;
 	h2c->dsi = -1;
 	h2c->msi = -1;
+	h2c->streams_by_id = EB_ROOT_UNIQUE;
 
 	/* Now we can schedule the applet. */
 	si_applet_cant_get(&s->si[1]);

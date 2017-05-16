@@ -23,6 +23,7 @@
 #define _TYPES_PROTO_H2_H
 
 #include <common/config.h>
+#include <eb32tree.h>
 #include <types/stream.h>
 #include <types/task.h>
 
@@ -96,6 +97,7 @@ enum h2_ft {
 /* H2 connection descriptor */
 struct h2c {
 	struct appctx *appctx;
+	struct eb_root streams_by_id; /* all active streams by their ID */
 	int32_t max_id; /* highest ID known on this connection */
 
 	/* states for the demux direction */
@@ -113,6 +115,7 @@ struct h2c {
 struct h2s {
 	struct appctx *appctx;
 	struct h2c *h2c;
+	struct eb32_node by_id; /* place in h2c's streams_by_id */
 	int32_t id; /* stream ID */
 	enum h2_ss st;
 	uint8_t rst;

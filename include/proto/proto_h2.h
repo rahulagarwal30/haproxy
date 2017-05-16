@@ -108,6 +108,26 @@ static inline int h2c_mux_busy(const struct h2c *h2c)
 	return h2c->msi >= 0;
 }
 
+/* returns the stream associated with id <id> or NULL if not found */
+static inline struct h2s *h2c_st_by_id(struct h2c *h2c, int id)
+{
+	struct eb32_node *node;
+	struct h2s *h2s;
+
+	node = eb32_lookup(&h2c->streams_by_id, id);
+	if (!node)
+		return NULL;
+
+	h2s = container_of(node, struct h2s, by_id);
+
+	/* TEMP DEBUGGING CODE */
+	if (h2s->id != id)
+		fprintf(stderr, "%s:%d(%s): BUG!: h2c=%p id=%d ret=%p id=%d\n", __FILE__, __LINE__, __FUNCTION__, h2c, id, h2s, id);
+	/* /DEBUG */
+
+	return h2s;
+}
+
 #endif /* _PROTO_PROTO_H2_H */
 
 /*
