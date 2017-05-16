@@ -199,6 +199,9 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 
 	if (!id)
 		fprintf(stderr, "%s:%d(%s): BUG!: h2c=%p id=%d\n", __FILE__, __LINE__, __FUNCTION__, h2c, id);
+
+	if (id <= h2c->max_id)
+		fprintf(stderr, "%s:%d(%s): BUG!: h2c=%p id=%d <= max_id=%d\n", __FILE__, __LINE__, __FUNCTION__, h2c, id, h2c->max_id);
 	/* /DEBUG */
 
 	h2s = pool_alloc2(pool2_h2s);
@@ -210,6 +213,7 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 	h2s->st        = H2_SS_IDLE;
 	h2s->rst       = H2_RST_NONE;
 	h2s->by_id.key = h2s->id = id;
+	h2c->max_id    = id;
 	eb32_insert(&h2c->streams_by_id, &h2s->by_id);
  out:
 	return h2s;
@@ -287,10 +291,10 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			if (reql == 0)
 				goto out;
 
-			fprintf(stderr, "[%d] Received frame of %d bytes, type %d (%s), flags %02x, sid %d\n",
+			fprintf(stderr, "[%d] Received frame of %d bytes, type %d (%s), flags %02x, sid %d [max_id=%d]\n",
 				appctx->st0, h2c->dfl,
 				h2c->dft & 0xff, h2_ft_str(h2c->dft),
-				h2c->dft >> 8, h2c->dsi);
+				h2c->dft >> 8, h2c->dsi, h2c->max_id);
 
 			if (unlikely(appctx->st0 == H2_CS_SETTINGS1)) {
 				// supports a single frame type here
@@ -363,6 +367,10 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			if (h2_ff(h2c->dft) & H2_F_HEADERS_PRIORITY)
 				fprintf(stderr, "[%d] HEADERS with PRIORITY\n", appctx->st0);
 
+			if (h2c->dsi <= h2c->max_id) {
+				fprintf(stderr, "    reused ID %d (max_id=%d)!", h2c->dsi, h2c->max_id);
+				goto fail;
+			}
 			h2s = h2c_st_by_id(h2c, h2c->dsi);
 			fprintf(stderr, "    [h2s=%p:%s]", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
 
