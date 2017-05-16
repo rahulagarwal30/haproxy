@@ -222,6 +222,41 @@ static int h2c_frt_ack_ping(struct h2c *h2c, const char *payload)
 	return ret + 1;
 }
 
+/* try to send a GOAWAY frame on the connection to report an error, with
+ * h2c->errcode as the error code. Returns 0 if not possible yet, <0 on error,
+ * >0 on success. Don't use this for a graceful shutdown since h2c->max_id is
+ * used as the last stream ID.
+ */
+static int h2c_frt_send_goaway_error(struct h2c *h2c)
+{
+	struct appctx *appctx = h2c->appctx;
+	struct stream_interface *si = appctx->owner;
+	struct channel *res = si_ic(si);
+	char str[17];
+	int ret = -1;
+
+	if (h2c_mux_busy(h2c))
+		goto end;
+
+	if ((res->buf == &buf_empty) &&
+	    !channel_alloc_buffer(res, &appctx->buffer_wait)) {
+		si_applet_cant_put(si);
+		goto end;
+	}
+
+	/* len: 8, type: 7, flags: none, sid: 0 */
+	memcpy(str, "\x00\x00\x08\x07\x00\x00\x00\x00\x00", 9);
+	h2_u32_encode(str + 9, h2c->max_id);
+	h2_u32_encode(str + 13, h2c->errcode);
+
+	ret = bi_putblk(res, str, 17);
+ end:
+	fprintf(stderr, "[%d] sent GOAWAY (%d,%x) = %d\n", appctx->st0, h2c->max_id, h2c->errcode, ret);
+
+	/* success: >= 0 ; wait: -1; failure: < -1 */
+	return ret + 1;
+}
+
 /* creates a new stream <id> on the h2c connection and returns it, or NULL in
  * case of memory allocation error.
  */
