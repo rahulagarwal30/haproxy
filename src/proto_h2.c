@@ -353,7 +353,36 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		appctx->st0 = H2_CS_SETTINGS1;
 	}
 
+	if (appctx->st0 == H2_CS_ERROR2) {
+		/* must never happen */
+		goto fail;
+	}
+
 	while (1) {
+		if (appctx->st0 == H2_CS_ERROR) {
+			/* errcode is already filled, send GOAWAY now and
+			 * close. We also silently destroy any incoming data to
+			 * possibly unlock the sender and make it read pending data.
+			 */
+			bo_skip(req, req->buf->o);
+
+			ret = h2c_frt_send_goaway_error(h2c);
+			if (!ret) {
+				h2c->flags |= H2_CF_BUFFER_FULL;
+				goto out;
+			}
+
+			if (ret < 0)
+				goto fail;
+
+			/* OK message sent, let's close now */
+			appctx->st0 = H2_CS_ERROR2;
+			res->flags |= CF_READ_NULL;
+			si_shutw(si);
+			si_shutr(si);
+			goto out;
+		}
+
 		if (h2c->dsi < 0) {
 			/* we need to read a new frame */
 

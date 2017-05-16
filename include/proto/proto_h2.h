@@ -134,6 +134,13 @@ static inline int h2c_mux_busy(const struct h2c *h2c)
 	return h2c->msi >= 0;
 }
 
+/* sets the h2 connection to error state with the accompanying error code */
+static inline void h2c_error(struct h2c *h2c, enum h2_err err)
+{
+	h2c->errcode = err;
+	h2c->appctx->st0 = H2_CS_ERROR;
+}
+
 /* returns the stream associated with id <id> or NULL if not found */
 static inline struct h2s *h2c_st_by_id(struct h2c *h2c, int id)
 {
