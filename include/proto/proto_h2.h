@@ -30,6 +30,9 @@
 /* human-readable frame type names */
 extern const char *h2_ft_strings[H2_FT_ENTRIES];
 
+/* human-readable stream state names */
+extern const char *h2_ss_strings[H2_SS_ENTRIES];
+
 
 int h2c_frt_init(struct stream *s);
 
@@ -89,6 +92,14 @@ static inline const char *h2_ft_str(int type)
 	if (type >= H2_FT_ENTRIES)
 		return "_UNKNOWN_";
 	return h2_ft_strings[type];
+}
+
+/* returns a const string giving the name of stream state <state> */
+static inline const char *h2_ss_str(int state)
+{
+	if (state >= H2_SS_ENTRIES)
+		return "_UNKNOWN_";
+	return h2_ss_strings[state];
 }
 
 /* returns true of the mux is currently busy */

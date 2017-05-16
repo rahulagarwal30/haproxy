@@ -70,6 +70,16 @@ const char *h2_ft_strings[H2_FT_ENTRIES] = {
 	[H2_FT_WINDOW_UPDATE] =	"WINDOW_UPDATE",
 };
 
+const char *h2_ss_strings[H2_SS_ENTRIES] = {
+	[H2_SS_IDLE]   = "idle",
+	[H2_SS_RLOC]   = "reserved(local)",
+	[H2_SS_RREM]   = "reserved(remote)",
+	[H2_SS_OPEN]   = "open",
+	[H2_SS_HREM]   = "half-closed(remote)",
+	[H2_SS_HLOC]   = "half-closed(local)",
+	[H2_SS_CLOSED] = "closed",
+};
+
 struct applet h2c_frt_applet = {
 	.obj_type = OBJ_TYPE_APPLET,
 	.name = "<H2CFRT>", /* used for logging */

@@ -44,6 +44,7 @@ enum h2_ss {
 	H2_SS_HREM,     // half-closed(remote)
 	H2_SS_HLOC,     // half-closed(local)
 	H2_SS_CLOSED,   // closed
+	H2_SS_ENTRIES   // must be last
 } __attribute__((packed));
 
 /* H2 stream reset notifications, in h2s->rst */
