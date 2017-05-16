@@ -357,6 +357,19 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM)
 				h2s->st = H2_SS_HREM;
 			fprintf(stderr, " [newh2s=%p:%s]\n", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
+
+		case H2_FT_DATA:
+			if (h2_ff(h2c->dft) & H2_F_DATA_END_STREAM)
+				fprintf(stderr, "[%d] DATA with END_STREAM\n", appctx->st0);
+			if (h2_ff(h2c->dft) & H2_F_DATA_PADDED)
+				fprintf(stderr, "[%d] DATA with PADDED\n", appctx->st0);
+
+			h2s = h2c_st_by_id(h2c, h2c->dsi);
+			fprintf(stderr, "    [h2s=%p:%s]", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
+
+			if (h2s->st == H2_SS_OPEN && (h2_ff(h2c->dft) & H2_F_DATA_END_STREAM))
+				h2s->st = H2_SS_HREM;
+			fprintf(stderr, " [h2s=%p:%s]\n", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
 		}
 
 		if (!ret)
