@@ -394,8 +394,11 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			}
 
 			reql = h2_get_frame(req, &h2c->dfl, &h2c->dft, &h2c->dsi);
-			if (reql < 0)
-				goto fail;
+			if (reql < 0) {
+				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+				continue;
+			}
+
 			if (reql == 0)
 				goto out;
 
@@ -407,8 +410,10 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			if (unlikely(appctx->st0 == H2_CS_SETTINGS1)) {
 				// supports a single frame type here
 				if (h2_ft(h2c->dft) != H2_FT_SETTINGS ||
-				    (h2_ff(h2c->dft) & H2_F_SETTINGS_ACK))
-					goto fail;
+				    (h2_ff(h2c->dft) & H2_F_SETTINGS_ACK)) {
+					h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+					continue;
+				}
 				appctx->st0 = H2_CS_FRAME;
 			}
 		}
@@ -420,7 +425,8 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		if (h2c->dfl && frame_len <= 0) {
 			if (frame_len < 0 || req->buf->o == req->buf->size) {
 				fprintf(stderr, "[%d] Truncated frame payload: %d/%d bytes read only\n", appctx->st0, req->buf->o, h2c->dfl);
-				goto fail;
+				h2c_error(h2c, H2_ERR_FRAME_SIZE_ERROR);
+				continue;
 			}
 			fprintf(stderr, "[%d] Received incomplete frame (%d/%d bytes), waiting [cflags=0x%08x]\n", appctx->st0, req->buf->o, h2c->dfl, req->flags);
 			goto out;
@@ -444,8 +450,10 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 
 		case H2_FT_PING:
 			/* frame length must be exactly 8 */
-			if (h2c->dfl != 8)
-				goto fail;
+			if (h2c->dfl != 8) {
+				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+				continue;
+			}
 
 			if (!(h2_ff(h2c->dft) & H2_F_PING_ACK))
 				ret = h2c_frt_ack_ping(h2c, temp->str);
@@ -477,7 +485,8 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 
 			if (h2c->dsi <= h2c->max_id) {
 				fprintf(stderr, "    reused ID %d (max_id=%d)!", h2c->dsi, h2c->max_id);
-				goto fail;
+				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+				continue;
 			}
 			h2s = h2c_st_by_id(h2c, h2c->dsi);
 			fprintf(stderr, "    [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
@@ -509,8 +518,10 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			goto out;
 		}
 
-		if (ret < 0)
-			goto fail;
+		if (ret < 0) {
+			h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+			continue;
+		}
 
 		bo_skip(req, frame_len);
 		h2c->dsi = -1;
