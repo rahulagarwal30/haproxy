@@ -496,6 +496,13 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM)
 				h2s->st = H2_SS_HREM;
 			fprintf(stderr, " [newh2s=%p:%s]\n", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
+#ifndef DONT_CLOSE
+			// HEADERS not implemented yet
+			if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM) {
+				h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+				continue;
+			}
+#endif
 			break;
 
 		case H2_FT_DATA:
@@ -510,6 +517,11 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			if (h2s->st == H2_SS_OPEN && (h2_ff(h2c->dft) & H2_F_DATA_END_STREAM))
 				h2s->st = H2_SS_HREM;
 			fprintf(stderr, " [h2s=%p:%s]\n", h2s, h2_ss_str(h2s->st));
+#ifndef DONT_CLOSE
+			// DATA not implemented yet
+			h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+			continue;
+#endif
 			break;
 		}
 
