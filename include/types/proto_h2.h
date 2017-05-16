@@ -35,6 +35,23 @@ enum h2_cs {
 	H2_CS_FRAME,     // first settings frame ok, waiting for regular frame
 };
 
+/* H2 stream state, in h2s->st */
+enum h2_ss {
+	H2_SS_IDLE = 0, // idle
+	H2_SS_RLOC,     // reserved(local)
+	H2_SS_RREM,     // reserved(remote)
+	H2_SS_OPEN,     // open
+	H2_SS_HREM,     // half-closed(remote)
+	H2_SS_HLOC,     // half-closed(local)
+	H2_SS_CLOSED,   // closed
+} __attribute__((packed));
+
+/* H2 stream reset notifications, in h2s->rst */
+#define H2_RST_NONE             0 // no RST exchanged
+#define H2_RST_RECV             1 // received RST_STREAM
+#define H2_RST_SENT             2 // sent RST_STREAM
+#define H2_RST_BOTH             3 // sent and received RST_STREAM
+
 enum h2_ft {
 	H2_FT_DATA            = 0x00,     // RFC7540 #6.1
 	H2_FT_HEADERS         = 0x01,     // RFC7540 #6.2
@@ -96,6 +113,9 @@ struct h2s {
 	struct appctx *appctx;
 	struct h2c *h2c;
 	int32_t id; /* stream ID */
+	enum h2_ss st;
+	uint8_t rst;
+	/* two unused bytes here */
 };
 
 #endif /* _TYPES_PROTO_H2_H */
