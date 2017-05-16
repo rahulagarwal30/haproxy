@@ -249,6 +249,7 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 
 	h2s->h2c       = h2c;
 	h2s->appctx    = h2c->appctx;
+	h2s->errcode   = H2_ERR_NO_ERROR;
 	h2s->st        = H2_SS_IDLE;
 	h2s->rst       = H2_RST_NONE;
 	h2s->blocked   = H2_BLK_NONE;
@@ -515,6 +516,7 @@ int h2c_frt_init(struct stream *s)
 	appctx->ctx.h2c.ctx = h2c;
 	h2c->appctx = appctx;
 	h2c->max_id = 0;
+	h2c->errcode = H2_ERR_NO_ERROR;
 	h2c->flags = H2_CF_NONE;
 	h2c->dsi = -1;
 	h2c->msi = -1;

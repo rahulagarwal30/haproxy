@@ -107,6 +107,24 @@ enum h2_ft {
 // RFC7540 #6.8 : GOAWAY defines no flags
 // RFC7540 #6.9 : WINDOW_UPDATE defines no flags
 
+/* HTTP/2 error codes - RFC7540 #7 */
+enum h2_err {
+	H2_ERR_NO_ERROR            = 0x0,
+	H2_ERR_PROTOCOL_ERROR      = 0x1,
+	H2_ERR_INTERNAL_ERROR      = 0x2,
+	H2_ERR_FLOW_CONTROL_ERROR  = 0x3,
+	H2_ERR_SETTINGS_TIMEOUT    = 0x4,
+	H2_ERR_STREAM_CLOSED       = 0x5,
+	H2_ERR_FRAME_SIZE_ERROR    = 0x6,
+	H2_ERR_REFUSED_STREAM      = 0x7,
+	H2_ERR_CANCEL              = 0x8,
+	H2_ERR_COMPRESSION_ERROR   = 0x9,
+	H2_ERR_CONNECT_ERROR       = 0xa,
+	H2_ERR_ENHANCE_YOUR_CALM   = 0xb,
+	H2_ERR_INADEQUATE_SECURITY = 0xc,
+	H2_ERR_HTTP_1_1_REQUIRED   = 0xd,
+};
+
 /* H2 connection descriptor */
 struct h2c {
 	struct appctx *appctx;
@@ -114,6 +132,7 @@ struct h2c {
 	struct list active_list; /* list of active streams currently blocked */
 	int32_t max_id; /* highest ID known on this connection */
 	uint32_t flags; /* connection flags: H2_CF_* */
+	enum h2_err errcode; /* H2 err code (H2_ERR_*) */
 
 	/* states for the demux direction */
 	int dsi; /* demux stream ID (<0 = idle) */
@@ -133,6 +152,7 @@ struct h2s {
 	struct eb32_node by_id; /* place in h2c's streams_by_id */
 	struct list list; /* position in active/blocked lists if blocked>0 */
 	int32_t id; /* stream ID */
+	enum h2_err errcode; /* H2 err code (H2_ERR_*) */
 	enum h2_ss st;
 	uint8_t rst;
 	enum h2s_blocked_reason blocked;
