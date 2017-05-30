@@ -37,6 +37,8 @@
 #include <proto/channel.h>
 #include <proto/cli.h>
 #include <proto/frontend.h>
+#include <proto/hpack-dec.h>
+#include <proto/hpack-hdr.h>
 #include <proto/log.h>
 #include <proto/proto_tcp.h>
 #include <proto/proto_h2.h>
@@ -499,8 +501,28 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 #ifndef DONT_CLOSE
 			// HEADERS not implemented yet
 			if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM) {
+				// FIXME: ignore PAD, StremDep and PRIO for now
+				const uint8_t *hdrs = (uint8_t *)temp->str;
+				int flen = h2c->dfl;
+
+				if (h2_ff(h2c->dft) & H2_F_HEADERS_PADDED) {
+					hdrs += 1;
+					flen -= 1;
+				}
+				if (h2_ff(h2c->dft) & H2_F_HEADERS_PRIORITY) {
+					hdrs += 4; // stream dep
+					flen -= 4;
+				}
+				if (h2_ff(h2c->dft) & H2_F_HEADERS_PRIORITY) {
+					hdrs += 1; // weight
+					flen -= 1;
+				}
+
+				if (hpack_decode_frame(h2c->ddht, hdrs, flen) < 0)
+					h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+
+				/* FIXME: temporary to unlock the client until we respond */
 				h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
-				continue;
 			}
 #endif
 			break;
