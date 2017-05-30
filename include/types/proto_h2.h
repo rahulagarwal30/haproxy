@@ -24,6 +24,7 @@
 
 #include <common/config.h>
 #include <eb32tree.h>
+#include <types/hpack-hdr.h>
 #include <types/stream.h>
 #include <types/task.h>
 
@@ -137,6 +138,7 @@ struct h2c {
 	enum h2_err errcode; /* H2 err code (H2_ERR_*) */
 
 	/* states for the demux direction */
+	struct hpack_dht *ddht; /* demux dynamic header table */
 	int dsi; /* demux stream ID (<0 = idle) */
 	int dfl; /* demux frame length (if dsi >= 0) */
 	int dft; /* demux frame type (+ flags) (if dsi >= 0) */

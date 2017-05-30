@@ -571,6 +571,7 @@ static void h2c_frt_release_handler(struct appctx *appctx)
 		pool_free2(pool2_h2s, h2s);
 	}
 
+	hpack_dht_free(h2c->ddht);
 	pool_free2(pool2_h2c, h2c);
 	appctx->ctx.h2c.ctx = NULL;
 }
@@ -585,6 +586,10 @@ int h2c_frt_init(struct stream *s)
 
 	h2c = pool_alloc2(pool2_h2c);
 	if (!h2c)
+		goto fail;
+
+	h2c->ddht = hpack_dht_alloc(4096);
+	if (!h2c->ddht)
 		goto fail;
 
 	s->target = &h2c_frt_applet.obj_type;
