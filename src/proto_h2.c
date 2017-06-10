@@ -310,6 +310,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 	struct channel *req = si_oc(si);
 	struct channel *res = si_ic(si);
 	struct chunk *temp = NULL;
+	struct chunk *outbuf = NULL;
 	struct h2s *h2s;
 	int reql;
 	int ret;
@@ -319,6 +320,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		goto out;
 
 	temp = get_trash_chunk();
+	outbuf = alloc_trash_chunk();
 
 	h2c->flags &= ~H2_CF_BUFFER_FULL;
 
@@ -518,9 +520,15 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 					flen -= 1;
 				}
 
-				if (hpack_decode_frame(h2c->ddht, hdrs, flen) < 0)
+				outbuf->len = hpack_decode_frame(h2c->ddht, hdrs, flen, outbuf->str, outbuf->size - 1);
+				if (outbuf->len < 0) {
 					h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+					continue;
+				}
 
+				outbuf->str[outbuf->len] = 0;
+
+				fprintf(stderr, "request: %d bytes :\n<%s>\n", outbuf->len, outbuf->str);
 				/* FIXME: temporary to unlock the client until we respond */
 				h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
 			}
@@ -572,11 +580,13 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		si_shutr(si);
 		res->flags |= CF_READ_NULL;
 	}
+	free_trash_chunk(outbuf);
 	return;
 
  fail:
 	si_shutr(si);
 	si_shutw(si);
+	free_trash_chunk(outbuf);
 	return;
 }
 
