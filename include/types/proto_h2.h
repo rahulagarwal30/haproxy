@@ -37,7 +37,7 @@ enum h2_cs {
 	H2_CS_FRAME,     // first settings frame ok, waiting for regular frame
 	H2_CS_ERROR,     // send GOAWAY(errcode) and close the connection ASAP
 	H2_CS_ERROR2,    // GOAWAY(errcode) sent, close the connection ASAP
-};
+} __attribute__((packed));
 
 /* H2 stream state, in h2s->st */
 enum h2_ss {
@@ -76,7 +76,7 @@ enum h2_ft {
 	H2_FT_GOAWAY          = 0x07,     // RFC7540 #6.8
 	H2_FT_WINDOW_UPDATE   = 0x08,     // RFC7540 #6.9
 	H2_FT_ENTRIES /* must be last */
-};
+} __attribute__((packed));
 
 /* Connection flags (32 bit), in h2c->flags */
 #define H2_CF_NONE              0x00000000
@@ -126,7 +126,7 @@ enum h2_err {
 	H2_ERR_ENHANCE_YOUR_CALM   = 0xb,
 	H2_ERR_INADEQUATE_SECURITY = 0xc,
 	H2_ERR_HTTP_1_1_REQUIRED   = 0xd,
-};
+} __attribute__((packed));
 
 /* H2 connection descriptor */
 struct h2c {
@@ -160,7 +160,6 @@ struct h2s {
 	enum h2_ss st;
 	uint8_t rst;
 	enum h2s_blocked_reason blocked;
-	/* one unused byte here */
 };
 
 #endif /* _TYPES_PROTO_H2_H */
