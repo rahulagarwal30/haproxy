@@ -51,6 +51,8 @@
 
 static void h2c_frt_io_handler(struct appctx *appctx);
 static void h2c_frt_release_handler(struct appctx *appctx);
+static void h2s_frt_io_handler(struct appctx *appctx);
+static void h2s_frt_release_handler(struct appctx *appctx);
 
 struct pool_head *pool2_h2c;
 struct pool_head *pool2_h2s;
@@ -87,6 +89,13 @@ struct applet h2c_frt_applet = {
 	.name = "<H2CFRT>", /* used for logging */
 	.fct = h2c_frt_io_handler,
 	.release = h2c_frt_release_handler,
+};
+
+struct applet h2s_frt_applet = {
+	.obj_type = OBJ_TYPE_APPLET,
+	.name = "<H2SFRT>", /* used for logging */
+	.fct = h2s_frt_io_handler,
+	.release = h2s_frt_release_handler,
 };
 
 /* 4 const streams for the 4 possible RST states */
@@ -264,6 +273,10 @@ static int h2c_frt_send_goaway_error(struct h2c *h2c)
  */
 static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 {
+	struct session *sess = si_strm(h2c->appctx->owner)->sess;
+	struct appctx *appctx;
+	struct stream *s;
+	struct task *t;
 	struct h2s *h2s;
 
 	/* DEBUG CODE */
@@ -285,7 +298,6 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 		goto out;
 
 	h2s->h2c       = h2c;
-	h2s->appctx    = h2c->appctx;
 	h2s->errcode   = H2_ERR_NO_ERROR;
 	h2s->st        = H2_SS_IDLE;
 	h2s->rst       = H2_RST_NONE;
@@ -294,6 +306,55 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 	LIST_INIT(&h2s->list);
 	h2c->max_id    = id;
 	eb32_insert(&h2c->streams_by_id, &h2s->by_id);
+
+	appctx = appctx_new(&h2s_frt_applet);
+	if (!appctx)
+		goto out_close;
+
+	h2s->appctx = appctx;
+	appctx->ctx.h2s.ctx = h2s;
+	appctx->st0 = 0;
+
+	t = task_new();
+	if (!t)
+		goto out_free_appctx;
+
+	t->nice = sess->listener->nice;
+
+	s = stream_new(sess, t, &appctx->obj_type);
+	if (!s)
+		goto out_free_task;
+
+//	/* The tasks below are normally what is supposed to be done by
+//	 * fe->accept().
+//	 */
+//	s->flags = SF_ASSIGNED|SF_ADDR_SET;
+
+	/* applet is waiting for data */
+	si_applet_cant_get(&s->si[0]);
+	appctx_wakeup(appctx);
+
+	sess->listener->nbconn++; /* FIXME: we have no choice for now as the stream will decrease it */
+	sess->fe->feconn++; /* FIXME: we must increase it as it will be decresed at the end of the stream. beconn will be increased later */
+	jobs++;
+	if (!(sess->listener->options & LI_O_UNLIMITED))
+		actconn++;
+	totalconn++;
+
+	return h2s;
+
+	/* Error unrolling */
+ out_free_strm:
+	LIST_DEL(&s->by_sess);
+	LIST_DEL(&s->list);
+	pool_free2(pool2_stream, s);
+ out_free_task:
+	task_free(t);
+ out_free_appctx:
+	appctx_free(appctx);
+ out_close:
+	pool_free2(pool2_h2s, h2s);
+	h2s = NULL;
  out:
 	return h2s;
 }
@@ -495,10 +556,21 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			h2s = h2c_st_by_id(h2c, h2c->dsi);
 			fprintf(stderr, "    [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
 
+			/* FIXME: check here if we're going back for a paused stream which was waiting for a buffer */
+
 			h2s = h2c_stream_new(h2c, h2c->dsi);
 			h2s->st = H2_SS_OPEN;
 			if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM)
 				h2s->st = H2_SS_HREM;
+
+			/* FIXME: try to allocate a buffer here first. If it fails, abort now in hope to come back
+			 * once it's allocated. We need to do it this way so that the child stream is the one
+			 * in charge for getting its own buffer via its appctx. The h2s applet will wake up and
+			 * maybe we can complete the operation there or we can decide to pin the buffer and to
+			 * wake up the h2c.
+			 */
+
+
 			fprintf(stderr, " [newh2s=%p:%s]\n", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
 #ifndef DONT_CLOSE
 			// HEADERS not implemented yet
@@ -527,7 +599,6 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 				}
 
 				outbuf->str[outbuf->len] = 0;
-
 				fprintf(stderr, "request: %d bytes :\n<%s>\n", outbuf->len, outbuf->str);
 				/* FIXME: temporary to unlock the client until we respond */
 				h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
@@ -593,6 +664,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 static void h2c_frt_release_handler(struct appctx *appctx)
 {
 	struct h2c *h2c = appctx->ctx.h2c.ctx;
+	struct stream_interface *si;
 	struct h2s *h2s;
 	struct eb32_node *node;
 
@@ -600,6 +672,16 @@ static void h2c_frt_release_handler(struct appctx *appctx)
 	while (node) {
 		h2s = container_of(node, struct h2s, by_id);
 		node = eb32_next(node);
+
+		/* kill the stream's appctx if it exists and let the orphaned
+		 * stream finish in error.
+		 */
+		if (h2s->appctx->owner) {
+			si = h2s->appctx->owner;
+			si->flags |= SI_FL_ERR;
+			si_release_endpoint(si);
+		}
+
 		pool_free2(pool2_h2s, h2s);
 	}
 
@@ -664,6 +746,24 @@ int h2c_frt_init(struct stream *s)
  fail:
 	pool_free2(pool2_h2c, h2c);
 	return 0;
+}
+
+/* this is the other side of the h2c_frt_applet, it deals with the stream */
+static void h2s_frt_io_handler(struct appctx *appctx)
+{
+	struct stream_interface *si = appctx->owner;
+
+	/* FIXME: to do later */
+	fprintf(stderr, "in %s\n", __FUNCTION__);
+
+	si_applet_cant_get(si);
+	si_applet_stop_put(si);
+}
+
+static void h2s_frt_release_handler(struct appctx *appctx)
+{
+	/* FIXME: to do later */
+	fprintf(stderr, "in %s\n", __FUNCTION__);
 }
 
 __attribute__((constructor))
