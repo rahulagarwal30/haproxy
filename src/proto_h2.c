@@ -325,6 +325,10 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 	if (!s)
 		goto out_free_task;
 
+	/* FIXME: use channel_alloc_buffer() later with a soft retry */
+	if (!b_alloc_margin(&s->req.buf, global.tune.reserved_bufs))
+		goto out_free_strm;
+
 //	/* The tasks below are normally what is supposed to be done by
 //	 * fe->accept().
 //	 */
@@ -578,6 +582,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 				// FIXME: ignore PAD, StremDep and PRIO for now
 				const uint8_t *hdrs = (uint8_t *)temp->str;
 				int flen = h2c->dfl;
+				//struct stream = si_strm(h2s->appctx->owner);
 
 				if (h2_ff(h2c->dft) & H2_F_HEADERS_PADDED) {
 					hdrs += 1;
@@ -600,6 +605,15 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 
 				outbuf->str[outbuf->len] = 0;
 				fprintf(stderr, "request: %d bytes :\n<%s>\n", outbuf->len, outbuf->str);
+
+				if (bi_putchk(si_ic(h2s->appctx->owner), outbuf) < 0) {
+					si_applet_cant_put(h2s->appctx->owner);
+					printf("failed to copy to h2s buffer\n");
+				}
+
+				/* FIXME: certainly not sufficient */
+				stream_int_notify(h2s->appctx->owner);
+
 				/* FIXME: temporary to unlock the client until we respond */
 				h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
 			}
