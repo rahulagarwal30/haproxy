@@ -599,6 +599,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 
 				outbuf->len = hpack_decode_frame(h2c->ddht, hdrs, flen, outbuf->str, outbuf->size - 1);
 				if (outbuf->len < 0) {
+					//fprintf(stderr, "hpack_decode_frame() = %d\n", outbuf->len);
 					h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
 					continue;
 				}
