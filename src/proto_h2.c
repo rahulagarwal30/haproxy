@@ -384,7 +384,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 	if (unlikely(si->state == SI_ST_DIS || si->state == SI_ST_CLO))
 		goto out;
 
-	temp = get_trash_chunk();
+	temp = alloc_trash_chunk();
 	outbuf = alloc_trash_chunk();
 
 	h2c->flags &= ~H2_CF_BUFFER_FULL;
@@ -667,12 +667,14 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		res->flags |= CF_READ_NULL;
 	}
 	free_trash_chunk(outbuf);
+	free_trash_chunk(temp);
 	return;
 
  fail:
 	si_shutr(si);
 	si_shutw(si);
 	free_trash_chunk(outbuf);
+	free_trash_chunk(temp);
 	return;
 }
 
