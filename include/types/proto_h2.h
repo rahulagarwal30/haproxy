@@ -135,6 +135,8 @@ struct h2c {
 	struct list active_list; /* list of active streams currently blocked */
 	int32_t max_id; /* highest ID known on this connection */
 	uint32_t flags; /* connection flags: H2_CF_* */
+	uint32_t rcvd_c; /* newly received data to ACK for the connection */
+	uint32_t rcvd_s; /* newly received data to ACK for the current stream (dsi) */
 	enum h2_err errcode; /* H2 err code (H2_ERR_*) */
 
 	/* states for the demux direction */
