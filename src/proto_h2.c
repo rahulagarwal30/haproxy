@@ -200,6 +200,39 @@ static int h2c_frt_ack_settings(struct h2c *h2c)
 	return ret + 1;
 }
 
+/* try to send a window update for stream id <sid> and value <increment>.
+ * Returns 0 if not possible yet, <0 on error, >0 on success.
+ */
+static int h2c_frt_window_update(struct h2c *h2c, int sid, uint32_t increment)
+{
+	struct appctx *appctx = h2c->appctx;
+	struct stream_interface *si = appctx->owner;
+	struct channel *res = si_ic(si);
+	char str[13];
+	int ret = -1;
+
+	if (h2c_mux_busy(h2c))
+		goto end;
+
+	if ((res->buf == &buf_empty) &&
+	    !channel_alloc_buffer(res, &appctx->buffer_wait)) {
+		si_applet_cant_put(si);
+		goto end;
+	}
+
+	/* len: 4, type: 8, flags: none */
+	memcpy(str, "\x00\x00\x04\x08\x00", 5);
+	h2_u32_encode(str + 5, sid);
+	h2_u32_encode(str + 9, increment);
+
+	ret = bi_putblk(res, str, 13);
+ end:
+	fprintf(stderr, "[%d] sent WINDOW_UPDATE (%d,%u) = %d\n", appctx->st0, sid, increment, ret);
+
+	/* success: >= 0 ; wait: -1; failure: < -1 */
+	return ret + 1;
+}
+
 /* try to send an ACK for a ping frame on the connection. Returns 0 if not
  * possible yet, <0 on error, >0 on success.
  */
@@ -627,12 +660,35 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			if (h2_ff(h2c->dft) & H2_F_DATA_PADDED)
 				fprintf(stderr, "[%d] DATA with PADDED\n", appctx->st0);
 
+			h2c->rcvd_c += frame_len;
+			h2c->rcvd_s += frame_len; // warning, this can also affect the closed streams!
+
 			h2s = h2c_st_by_id(h2c, h2c->dsi);
-			fprintf(stderr, "    [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
+			fprintf(stderr, "    [h2s=%p:%s] rcvd_c=%u rcvd_s=%u", h2s, h2_ss_str(h2s->st), h2c->rcvd_c, h2c->rcvd_s);
 
 			if (h2s->st == H2_SS_OPEN && (h2_ff(h2c->dft) & H2_F_DATA_END_STREAM))
 				h2s->st = H2_SS_HREM;
 			fprintf(stderr, " [h2s=%p:%s]\n", h2s, h2_ss_str(h2s->st));
+
+			{ static unsigned int foo;
+				foo += frame_len;
+				fprintf(stderr, "stream=%d total = %u\n", h2c->dsi, foo);
+			}
+
+			if (h2c->rcvd_c) {
+				ret = h2c_frt_window_update(h2c, 0, h2c->rcvd_c);
+				if (ret <= 0)
+					break;
+				h2c->rcvd_c = 0;
+			}
+
+			if (h2c->rcvd_s) {
+				ret = h2c_frt_window_update(h2c, h2c->dsi, h2c->rcvd_s);
+				if (ret <= 0)
+					break;
+				h2c->rcvd_s = 0;
+			}
+#define DONT_CLOSE
 #ifndef DONT_CLOSE
 			// DATA not implemented yet
 			h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
