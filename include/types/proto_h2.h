@@ -34,7 +34,8 @@ enum h2_cs {
 	H2_CS_INIT,      // created, initialization in progress
 	H2_CS_PREFACE,   // init done, waiting for connection preface
 	H2_CS_SETTINGS1, // preface OK, waiting for first settings frame
-	H2_CS_FRAME,     // first settings frame ok, waiting for regular frame
+	H2_CS_FRAME_H,   // first settings frame ok, waiting for frame header
+	H2_CS_FRAME_P,   // frame header OK, waiting for frame payload
 	H2_CS_ERROR,     // send GOAWAY(errcode) and close the connection ASAP
 	H2_CS_ERROR2,    // GOAWAY(errcode) sent, close the connection ASAP
 } __attribute__((packed));

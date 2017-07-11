@@ -492,8 +492,6 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			}
 			h2c->rcvd_s = 0;
 		}
-		/* we're done for sure now */
-		h2c->dsi = -1;
 	}
 
 	while (1) {
@@ -522,8 +520,11 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			goto out;
 		}
 
-		if (h2c->dsi < 0) {
-			/* we need to read a new frame */
+		if (appctx->st0 == H2_CS_FRAME_H || appctx->st0 == H2_CS_SETTINGS1) {
+			/* we need to read a new frame. h2c->dsi might not yet
+			 * have been reset, so we'll have to do it whenever we
+			 * leave this block.
+			 */
 
 			/* just for debugging */
 			if ((reql = bo_getblk(req, temp->str, req->buf->o, 0)) > 0) {
@@ -553,7 +554,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 					h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
 					continue;
 				}
-				appctx->st0 = H2_CS_FRAME;
+				appctx->st0 = H2_CS_FRAME_H;
 			}
 		}
 
@@ -731,6 +732,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		}
 
 		bo_skip(req, frame_len);
+		appctx->st0 = H2_CS_FRAME_H;
 
 		if (h2c->rcvd_c) {
 			/* send WU for the connection */
@@ -759,8 +761,6 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			}
 			h2c->rcvd_s = 0;
 		}
-
-		h2c->dsi = -1;
 	}
 
  out:
