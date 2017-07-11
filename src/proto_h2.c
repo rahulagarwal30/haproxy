@@ -468,57 +468,23 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		if (h2c->rcvd_c) {
 			/* send WU for the connection */
 			ret = h2c_frt_window_update(h2c, 0, h2c->rcvd_c);
-			if (ret <= 0) {
-				if (!ret) {
-					h2c->flags |= H2_CF_BUFFER_FULL;
-					goto out;
-				}
-				h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
-				goto error;
-			}
+			if (ret <= 0)
+				goto out_full_or_error;
 			h2c->rcvd_c = 0;
 		}
 
 		if (h2c->rcvd_s && h2c->dsi > 0) {
 			/* send WU for the stream */
 			ret = h2c_frt_window_update(h2c, h2c->dsi, h2c->rcvd_s);
-			if (ret <= 0) {
-				if (!ret) {
-					h2c->flags |= H2_CF_BUFFER_FULL;
-					goto out;
-				}
-				h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
-				goto error;
-			}
+			if (ret <= 0)
+				goto out_full_or_error;
 			h2c->rcvd_s = 0;
 		}
 	}
 
 	while (1) {
-		if (appctx->st0 == H2_CS_ERROR) {
-		error:
-			/* errcode is already filled, send GOAWAY now and
-			 * close. We also silently destroy any incoming data to
-			 * possibly unlock the sender and make it read pending data.
-			 */
-			bo_skip(req, req->buf->o);
-
-			ret = h2c_frt_send_goaway_error(h2c);
-			if (!ret) {
-				h2c->flags |= H2_CF_BUFFER_FULL;
-				goto out;
-			}
-
-			if (ret < 0)
-				goto fail;
-
-			/* OK message sent, let's close now */
-			appctx->st0 = H2_CS_ERROR2;
-			res->flags |= CF_READ_NULL;
-			si_shutw(si);
-			si_shutr(si);
-			goto out;
-		}
+		if (appctx->st0 == H2_CS_ERROR)
+			goto error;
 
 		if (appctx->st0 == H2_CS_FRAME_H || appctx->st0 == H2_CS_SETTINGS1) {
 			/* we need to read a new frame. h2c->dsi might not yet
@@ -537,7 +503,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			reql = h2_peek_frame_header(req, &dfl, &dft, &dsi);
 			if (reql < 0) {
 				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
-				continue;
+				goto error;
 			}
 
 			if (reql == 0)
@@ -553,7 +519,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 				if (h2_ft(dft) != H2_FT_SETTINGS ||
 				    (h2_ff(dft) & H2_F_SETTINGS_ACK)) {
 					h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
-					continue;
+					goto error;
 				}
 				appctx->st0 = H2_CS_FRAME_H;
 			}
@@ -564,28 +530,16 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 				if (h2c->rcvd_c) {
 					/* send WU for the connection */
 					ret = h2c_frt_window_update(h2c, 0, h2c->rcvd_c);
-					if (ret <= 0) {
-						if (!ret) {
-							h2c->flags |= H2_CF_BUFFER_FULL;
-							goto out;
-						}
-						h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
-						goto error;
-					}
+					if (ret <= 0)
+						goto out_full_or_error;
 					h2c->rcvd_c = 0;
 				}
 
 				if (h2c->rcvd_s && h2c->dsi > 0) {
 					/* send WU for the stream */
 					ret = h2c_frt_window_update(h2c, h2c->dsi, h2c->rcvd_s);
-					if (ret <= 0) {
-						if (!ret) {
-							h2c->flags |= H2_CF_BUFFER_FULL;
-							goto out;
-						}
-						h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
-						goto error;
-					}
+					if (ret <= 0)
+						goto out_full_or_error;
 					h2c->rcvd_s = 0;
 				}
 			}
@@ -605,7 +559,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			if (frame_len < 0 || req->buf->o == req->buf->size) {
 				fprintf(stderr, "[%d] Truncated frame payload: %d/%d bytes read only\n", appctx->st0, req->buf->o, h2c->dfl);
 				h2c_error(h2c, H2_ERR_FRAME_SIZE_ERROR);
-				continue;
+				goto error;
 			}
 			fprintf(stderr, "[%d] Received incomplete frame (%d/%d bytes), waiting [cflags=0x%08x]\n", appctx->st0, req->buf->o, h2c->dfl, req->flags);
 			goto out_empty;
@@ -631,7 +585,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			/* frame length must be exactly 8 */
 			if (h2c->dfl != 8) {
 				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
-				continue;
+				goto error;
 			}
 
 			if (!(h2_ff(h2c->dft) & H2_F_PING_ACK))
@@ -665,7 +619,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			if (h2c->dsi <= h2c->max_id) {
 				fprintf(stderr, "    reused ID %d (max_id=%d)!", h2c->dsi, h2c->max_id);
 				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
-				continue;
+				goto error;
 			}
 			h2s = h2c_st_by_id(h2c, h2c->dsi);
 			fprintf(stderr, "    [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
@@ -711,7 +665,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 				if (outbuf->len < 0) {
 					//fprintf(stderr, "hpack_decode_frame() = %d\n", outbuf->len);
 					h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
-					continue;
+					goto error;
 				}
 
 				outbuf->str[outbuf->len] = 0;
@@ -755,20 +709,13 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 #ifndef DONT_CLOSE
 			// DATA not implemented yet
 			h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
-			continue;
+			goto error;
 #endif
 			break;
 		}
 
-		if (!ret) {
-			h2c->flags |= H2_CF_BUFFER_FULL;
-			goto out;
-		}
-
-		if (ret < 0) {
-			h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
-			continue;
-		}
+		if (ret <= 0)
+			goto out_full_or_error;
 
 		bo_skip(req, frame_len);
 		appctx->st0 = H2_CS_FRAME_H;
@@ -783,28 +730,16 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 	if (h2c->rcvd_c) {
 		/* send WU for the connection */
 		ret = h2c_frt_window_update(h2c, 0, h2c->rcvd_c);
-		if (ret <= 0) {
-			if (!ret) {
-				h2c->flags |= H2_CF_BUFFER_FULL;
-				goto out;
-			}
-			h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
-			goto error;
-		}
+		if (ret <= 0)
+			goto out_full_or_error;
 		h2c->rcvd_c = 0;
 	}
 
 	if (h2c->rcvd_s && h2c->dsi > 0) {
 		/* send WU for the stream */
 		ret = h2c_frt_window_update(h2c, h2c->dsi, h2c->rcvd_s);
-		if (ret <= 0) {
-			if (!ret) {
-				h2c->flags |= H2_CF_BUFFER_FULL;
-				goto out;
-			}
-			h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
-			goto error;
-		}
+		if (ret <= 0)
+			goto out_full_or_error;
 		h2c->rcvd_s = 0;
 	}
 
@@ -822,6 +757,37 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 	free_trash_chunk(outbuf);
 	free_trash_chunk(temp);
 	return;
+
+ out_full_or_error:
+	/* branch here for all cases of ret <= 0 where 0 means "can't write,
+	 * output full" and <0 means internal error.
+	 */
+	if (!ret) {
+		h2c->flags |= H2_CF_BUFFER_FULL;
+		goto out;
+	}
+	h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+
+ error:
+	/* errcode is already filled, send GOAWAY now and
+	 * close. We also silently destroy any incoming data to
+	 * possibly unlock the sender and make it read pending data.
+	 */
+	bo_skip(req, req->buf->o);
+
+	ret = h2c_frt_send_goaway_error(h2c);
+	if (!ret) {
+		h2c->flags |= H2_CF_BUFFER_FULL;
+		goto out;
+	}
+
+	if (ret > 0) {
+		/* OK message sent, let's close now, and
+		 * fall through the failure code path.
+		 */
+		appctx->st0 = H2_CS_ERROR2;
+		res->flags |= CF_READ_NULL;
+	}
 
  fail:
 	si_shutr(si);
