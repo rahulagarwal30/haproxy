@@ -422,6 +422,177 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 	return h2s;
 }
 
+/* processes a SETTINGS frame and ACKs it if needed. Returns 0 if not possible
+ * yet, <0 on error, >0 on success.
+ */
+static int h2c_frt_handle_settings(struct h2c *h2c)
+{
+	if (!(h2_ff(h2c->dft) & H2_F_SETTINGS_ACK))
+		return h2c_frt_ack_settings(h2c);
+	return 1;
+}
+
+/* processes a PING frame and ACKs it if needed. The caller must pass the
+ * pointer to the payload in <payload>. Returns 0 if not possible yet, <0 on
+ * error, >0 on success.
+ */
+static int h2c_frt_handle_ping(struct h2c *h2c, const char *payload)
+{
+	/* frame length must be exactly 8 */
+	if (h2c->dfl != 8) {
+		h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+		return -1;
+	}
+
+	if (!(h2_ff(h2c->dft) & H2_F_PING_ACK))
+		return h2c_frt_ack_ping(h2c, payload);
+
+	return 1;
+}
+
+/* processes a HEADERS frame. The caller must pass the pointer to the payload
+ * in <payload> and to a temporary buffer in <outbuf> for the decoded traffic.
+ * Returns 0 if it needs to yield, <0 on error, >0 on success.
+ */
+static int h2c_frt_handle_headers(struct h2c *h2c, const char *payload, struct chunk *outbuf)
+{
+	struct h2s *h2s;
+
+	if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM)
+		fprintf(stderr, "[4] HEADERS with END_STREAM\n");
+	if (h2_ff(h2c->dft) & H2_F_HEADERS_END_HEADERS)
+		fprintf(stderr, "[4] HEADERS with END_HEADERS\n");
+	if (h2_ff(h2c->dft) & H2_F_HEADERS_PADDED)
+		fprintf(stderr, "[4] HEADERS with PADDED\n");
+	if (h2_ff(h2c->dft) & H2_F_HEADERS_PRIORITY)
+		fprintf(stderr, "[4] HEADERS with PRIORITY\n");
+
+	if (h2c->dsi <= h2c->max_id) {
+		fprintf(stderr, "    reused ID %d (max_id=%d)!", h2c->dsi, h2c->max_id);
+		h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+		return -1;
+	}
+
+	h2s = h2c_st_by_id(h2c, h2c->dsi);
+	fprintf(stderr, "    [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
+
+	/* FIXME: check here if we're coming back for a paused stream which was waiting for a buffer */
+
+	h2s = h2c_stream_new(h2c, h2c->dsi);
+	h2s->st = H2_SS_OPEN;
+	if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM)
+		h2s->st = H2_SS_HREM;
+
+	/* FIXME: try to allocate a buffer here first. If it fails, abort now in hope to come back
+	 * once it's allocated. We need to do it this way so that the child stream is the one
+	 * in charge for getting its own buffer via its appctx. The h2s applet will wake up and
+	 * maybe we can complete the operation there or we can decide to pin the buffer and to
+	 * wake up the h2c.
+	 */
+	fprintf(stderr, " [newh2s=%p:%s]\n", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
+
+	if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM) {
+		// FIXME: ignore PAD, StreamDep and PRIO for now
+		const uint8_t *hdrs = (uint8_t *)payload;
+		int flen = h2c->dfl;
+
+		if (h2_ff(h2c->dft) & H2_F_HEADERS_PADDED) {
+			hdrs += 1;
+			flen -= 1;
+		}
+		if (h2_ff(h2c->dft) & H2_F_HEADERS_PRIORITY) {
+			hdrs += 4; // stream dep
+			flen -= 4;
+		}
+		if (h2_ff(h2c->dft) & H2_F_HEADERS_PRIORITY) {
+			hdrs += 1; // weight
+			flen -= 1;
+		}
+
+		outbuf->len = hpack_decode_frame(h2c->ddht, hdrs, flen, outbuf->str, outbuf->size - 1);
+		if (outbuf->len < 0) {
+			//fprintf(stderr, "hpack_decode_frame() = %d\n", outbuf->len);
+			h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+			return -1;
+		}
+
+		outbuf->str[outbuf->len] = 0;
+		fprintf(stderr, "request: %d bytes :\n<%s>\n", outbuf->len, outbuf->str);
+
+		if (bi_putchk(si_ic(h2s->appctx->owner), outbuf) < 0) {
+			si_applet_cant_put(h2s->appctx->owner);
+			printf("failed to copy to h2s buffer\n");
+		}
+
+		/* FIXME: certainly not sufficient */
+		stream_int_notify(h2s->appctx->owner);
+
+		/* FIXME: temporary to unlock the client until we respond */
+		h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+	}
+
+	return 1;
+}
+
+/* processes a PRIORITY frame. The caller must pass the pointer to the payload
+ * in <payload>. Returns 0 if it needs to yield, <0 on error, >0 on success.
+ */
+static int h2c_frt_handle_priority(struct h2c *h2c, const char *payload)
+{
+	struct h2s *h2s;
+
+	fprintf(stderr, "   ");
+	if (payload[0] & 0x80)
+		fprintf(stderr, " [EXCLUSIVE] ");
+
+	fprintf(stderr, " [dep=%d] ", ((payload[0] & 0x7f)<<24) + ((unsigned char)payload[1] << 16) + ((unsigned char)payload[2] << 8) + (unsigned char)payload[3]);
+
+	fprintf(stderr, " [weight=%d] ", (unsigned char)payload[4]);
+
+	h2s = h2c_st_by_id(h2c, h2c->dsi);
+	fprintf(stderr, " [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
+	fprintf(stderr, "\n");
+	return 1;
+}
+
+/* processes a DATA frame. The caller must pass the pointer to the payload
+ * in <payload> for length <plen>. Returns 0 if it needs to yield, <0 on error, >0 on success.
+ */
+static int h2c_frt_handle_data(struct h2c *h2c, const char *payload, int plen)
+{
+	struct h2s *h2s;
+
+	/* FIXME: drops data for now */
+
+	if (h2_ff(h2c->dft) & H2_F_DATA_END_STREAM)
+		fprintf(stderr, "[4] DATA with END_STREAM\n");
+	if (h2_ff(h2c->dft) & H2_F_DATA_PADDED)
+		fprintf(stderr, "[4] DATA with PADDED\n");
+
+	h2c->rcvd_c += plen;
+	h2c->rcvd_s += plen; // warning, this can also affect the closed streams!
+
+	h2s = h2c_st_by_id(h2c, h2c->dsi);
+	fprintf(stderr, "    [h2s=%p:%s] rcvd_c=%u rcvd_s=%u", h2s, h2_ss_str(h2s->st), h2c->rcvd_c, h2c->rcvd_s);
+
+	if (h2s->st == H2_SS_OPEN && (h2_ff(h2c->dft) & H2_F_DATA_END_STREAM))
+		h2s->st = H2_SS_HREM;
+	fprintf(stderr, " [h2s=%p:%s]\n", h2s, h2_ss_str(h2s->st));
+
+	{
+		static unsigned int foo;
+		foo += plen;
+		fprintf(stderr, "stream=%d total = %u\n", h2c->dsi, foo);
+	}
+#define DONT_CLOSE
+#ifndef DONT_CLOSE
+	// DATA not implemented yet
+	h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+	return -1;
+#endif
+	return 1;
+}
+
 /* This I/O handler runs as an applet embedded in a stream interface. It is
  * used to send HTTP stats over a TCP socket. The mechanism is very simple.
  * appctx->st0 contains the operation in progress (dump, done). The handler
@@ -435,7 +606,6 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 	struct channel *res = si_ic(si);
 	struct chunk *temp = NULL;
 	struct chunk *outbuf = NULL;
-	struct h2s *h2s;
 	int reql;
 	int ret;
 	int frame_len;
@@ -563,147 +733,28 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			fprintf(stderr, "--------------\n");
 		}
 
-		/* FIXME: temporary measure. We at least need to ensure that
-		 * it's still possible to read more data.
-		 */
-		ret = 1; // assume success for frames that we ignore. 0=yield, <0=fail.
 		switch (h2_ft(h2c->dft)) {
 		case H2_FT_SETTINGS:
-			if (!(h2_ff(h2c->dft) & H2_F_SETTINGS_ACK))
-				ret = h2c_frt_ack_settings(h2c);
+			ret = h2c_frt_handle_settings(h2c);
 			break;
 
 		case H2_FT_PING:
-			/* frame length must be exactly 8 */
-			if (h2c->dfl != 8) {
-				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
-				goto error;
-			}
-
-			if (!(h2_ff(h2c->dft) & H2_F_PING_ACK))
-				ret = h2c_frt_ack_ping(h2c, temp->str);
+			ret = h2c_frt_handle_ping(h2c, temp->str);
 			break;
 
 		case H2_FT_PRIORITY:
-			fprintf(stderr, "   ");
-			if (temp->str[0] & 0x80)
-				fprintf(stderr, " [EXCLUSIVE] ");
-
-			fprintf(stderr, " [dep=%d] ", ((temp->str[0] & 0x7f)<<24) + ((unsigned char)temp->str[1] << 16) + ((unsigned char)temp->str[2] << 8) + (unsigned char)temp->str[3]);
-
-			fprintf(stderr, " [weight=%d] ", (unsigned char)temp->str[4]);
-
-			h2s = h2c_st_by_id(h2c, h2c->dsi);
-			fprintf(stderr, " [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
-			fprintf(stderr, "\n");
+			ret = h2c_frt_handle_priority(h2c, temp->str);
 			break;
 
 		case H2_FT_HEADERS:
-			if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM)
-				fprintf(stderr, "[%d] HEADERS with END_STREAM\n", appctx->st0);
-			if (h2_ff(h2c->dft) & H2_F_HEADERS_END_HEADERS)
-				fprintf(stderr, "[%d] HEADERS with END_HEADERS\n", appctx->st0);
-			if (h2_ff(h2c->dft) & H2_F_HEADERS_PADDED)
-				fprintf(stderr, "[%d] HEADERS with PADDED\n", appctx->st0);
-			if (h2_ff(h2c->dft) & H2_F_HEADERS_PRIORITY)
-				fprintf(stderr, "[%d] HEADERS with PRIORITY\n", appctx->st0);
-
-			if (h2c->dsi <= h2c->max_id) {
-				fprintf(stderr, "    reused ID %d (max_id=%d)!", h2c->dsi, h2c->max_id);
-				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
-				goto error;
-			}
-			h2s = h2c_st_by_id(h2c, h2c->dsi);
-			fprintf(stderr, "    [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
-
-			/* FIXME: check here if we're going back for a paused stream which was waiting for a buffer */
-
-			h2s = h2c_stream_new(h2c, h2c->dsi);
-			h2s->st = H2_SS_OPEN;
-			if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM)
-				h2s->st = H2_SS_HREM;
-
-			/* FIXME: try to allocate a buffer here first. If it fails, abort now in hope to come back
-			 * once it's allocated. We need to do it this way so that the child stream is the one
-			 * in charge for getting its own buffer via its appctx. The h2s applet will wake up and
-			 * maybe we can complete the operation there or we can decide to pin the buffer and to
-			 * wake up the h2c.
-			 */
-
-
-			fprintf(stderr, " [newh2s=%p:%s]\n", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
-#ifndef DONT_CLOSE
-			// HEADERS not implemented yet
-			if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM) {
-				// FIXME: ignore PAD, StremDep and PRIO for now
-				const uint8_t *hdrs = (uint8_t *)temp->str;
-				int flen = h2c->dfl;
-				//struct stream = si_strm(h2s->appctx->owner);
-
-				if (h2_ff(h2c->dft) & H2_F_HEADERS_PADDED) {
-					hdrs += 1;
-					flen -= 1;
-				}
-				if (h2_ff(h2c->dft) & H2_F_HEADERS_PRIORITY) {
-					hdrs += 4; // stream dep
-					flen -= 4;
-				}
-				if (h2_ff(h2c->dft) & H2_F_HEADERS_PRIORITY) {
-					hdrs += 1; // weight
-					flen -= 1;
-				}
-
-				outbuf->len = hpack_decode_frame(h2c->ddht, hdrs, flen, outbuf->str, outbuf->size - 1);
-				if (outbuf->len < 0) {
-					//fprintf(stderr, "hpack_decode_frame() = %d\n", outbuf->len);
-					h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
-					goto error;
-				}
-
-				outbuf->str[outbuf->len] = 0;
-				fprintf(stderr, "request: %d bytes :\n<%s>\n", outbuf->len, outbuf->str);
-
-				if (bi_putchk(si_ic(h2s->appctx->owner), outbuf) < 0) {
-					si_applet_cant_put(h2s->appctx->owner);
-					printf("failed to copy to h2s buffer\n");
-				}
-
-				/* FIXME: certainly not sufficient */
-				stream_int_notify(h2s->appctx->owner);
-
-				/* FIXME: temporary to unlock the client until we respond */
-				h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
-			}
-#endif
+			ret = h2c_frt_handle_headers(h2c, temp->str, outbuf);
 			break;
 
 		case H2_FT_DATA:
-			if (h2_ff(h2c->dft) & H2_F_DATA_END_STREAM)
-				fprintf(stderr, "[%d] DATA with END_STREAM\n", appctx->st0);
-			if (h2_ff(h2c->dft) & H2_F_DATA_PADDED)
-				fprintf(stderr, "[%d] DATA with PADDED\n", appctx->st0);
-
-			h2c->rcvd_c += frame_len;
-			h2c->rcvd_s += frame_len; // warning, this can also affect the closed streams!
-
-			h2s = h2c_st_by_id(h2c, h2c->dsi);
-			fprintf(stderr, "    [h2s=%p:%s] rcvd_c=%u rcvd_s=%u", h2s, h2_ss_str(h2s->st), h2c->rcvd_c, h2c->rcvd_s);
-
-			if (h2s->st == H2_SS_OPEN && (h2_ff(h2c->dft) & H2_F_DATA_END_STREAM))
-				h2s->st = H2_SS_HREM;
-			fprintf(stderr, " [h2s=%p:%s]\n", h2s, h2_ss_str(h2s->st));
-
-			{ static unsigned int foo;
-				foo += frame_len;
-				fprintf(stderr, "stream=%d total = %u\n", h2c->dsi, foo);
-			}
-#define DONT_CLOSE
-#ifndef DONT_CLOSE
-			// DATA not implemented yet
-			h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
-			goto error;
-#endif
+			ret = h2c_frt_handle_data(h2c, temp->str, frame_len);
 			break;
+		default:
+			ret = 1; // assume success for frames that we ignore. 0=yield, <0=fail.
 		}
 
 		if (ret <= 0)
