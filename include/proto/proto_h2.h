@@ -39,13 +39,14 @@ extern const struct h2s *h2_idle_stream;
 
 int h2c_frt_init(struct stream *s);
 
-/* receives the next H2 frame and stores the length in <len>, the flags and
- * the type in <type> ((flags << 8) | type), and the stream ID in <sid>.
- * If the frame is properly received, the channel is automatically advanced.
- * Otherwise 0 is returned if bytes are missing, or -1 if the channel is
- * closed.
+/* Peeks frame headers from the next H2 frame and stores the length in <len>,
+ * the flags and the type in <type> ((flags << 8) | type), and the stream ID in
+ * <sid>. The channel is *not* automatically advanced, it's up to the caller to
+ * do it using h2_skip_frame_header(), or to use h2_get_frame_header() to do
+ * both. A positive value is returned on success, 0 is returned if bytes are
+ * missing, and -1 if the channel is closed.
  */
-static inline int h2_get_frame(struct channel *chn, int *len, int *type, int *sid)
+static inline int h2_peek_frame_header(struct channel *chn, int *len, int *type, int *sid)
 {
 	uint8_t copy[9];
 	const uint8_t *ptr;
@@ -69,9 +70,26 @@ static inline int h2_get_frame(struct channel *chn, int *len, int *type, int *si
 	*len  = (ptr[0] << 16) + (ptr[1] << 8) + ptr[2];
 	*type = (ptr[4] << 8) + ptr[3];
 	*sid  = ((ptr[5] << 24) + (ptr[6] << 16) + (ptr[7] << 8) + ptr[8]) & 0x7fffffff;
-
-	bo_skip(chn, 9);
 	return 1;
+}
+
+/* skip the next 9 bytes corresponding to the frame header possibly parsed by
+ * h2_peek_frame_header() above.
+ */
+static inline void h2_skip_frame_header(struct channel *chn)
+{
+	bo_skip(chn, 9);
+}
+
+/* same as above, automatically advances the channel on success */
+static inline int h2_get_frame_header(struct channel *chn, int *len, int *type, int *sid)
+{
+	int ret;
+
+	ret = h2_peek_frame_header(chn, len, type, sid);
+	if (ret > 0)
+		h2_skip_frame_header(chn);
+	return ret;
 }
 
 /* returns the frame type without the flags */

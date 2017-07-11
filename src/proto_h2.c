@@ -532,7 +532,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 				fprintf(stderr, "----------------------------\n");
 			}
 
-			reql = h2_get_frame(req, &h2c->dfl, &h2c->dft, &h2c->dsi);
+			reql = h2_get_frame_header(req, &h2c->dfl, &h2c->dft, &h2c->dsi);
 			if (reql < 0) {
 				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
 				continue;
