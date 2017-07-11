@@ -233,6 +233,32 @@ static int h2c_frt_window_update(struct h2c *h2c, int sid, uint32_t increment)
 	return ret + 1;
 }
 
+/* try to send pending window updates for the connection. It's safe to call it
+ * with no pending updates. Returns 0 if not possible yet, <0 on error, >0 on
+ * success.
+ */
+static int h2c_frt_send_window_updates(struct h2c *h2c)
+{
+	int ret = 1;
+
+	if (h2c->rcvd_c) {
+		/* send WU for the connection */
+		ret = h2c_frt_window_update(h2c, 0, h2c->rcvd_c);
+		if (ret <= 0)
+			return ret;
+		h2c->rcvd_c = 0;
+	}
+
+	if (h2c->rcvd_s) {
+		/* send WU for the stream */
+		ret = h2c_frt_window_update(h2c, h2c->dsi, h2c->rcvd_s);
+		if (ret <= 0)
+			return ret;
+		h2c->rcvd_s = 0;
+	}
+	return ret;
+}
+
 /* try to send an ACK for a ping frame on the connection. Returns 0 if not
  * possible yet, <0 on error, >0 on success.
  */
@@ -460,26 +486,14 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		goto fail;
 	}
 
-	if (appctx->st0 != H2_CS_ERROR && (h2c->rcvd_c || h2c->rcvd_s)) {
+	if (appctx->st0 != H2_CS_ERROR) {
 		/* a final window update failed to be sent after processing
 		 * last frame. h2c->dsi wasn't reset yet, so we have to
 		 * complete the operation.
 		 */
-		if (h2c->rcvd_c) {
-			/* send WU for the connection */
-			ret = h2c_frt_window_update(h2c, 0, h2c->rcvd_c);
-			if (ret <= 0)
-				goto out_full_or_error;
-			h2c->rcvd_c = 0;
-		}
-
-		if (h2c->rcvd_s && h2c->dsi > 0) {
-			/* send WU for the stream */
-			ret = h2c_frt_window_update(h2c, h2c->dsi, h2c->rcvd_s);
-			if (ret <= 0)
-				goto out_full_or_error;
-			h2c->rcvd_s = 0;
-		}
+		ret = h2c_frt_send_window_updates(h2c);
+		if (ret <= 0)
+			goto out_full_or_error;
 	}
 
 	while (1) {
@@ -525,23 +539,11 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			}
 
 			/* appctx->st0 is H2_CS_FRAME_H now */
-			if (h2c->dsi != dsi && (h2c->rcvd_c || h2c->rcvd_s)) {
+			if (h2c->dsi != dsi) {
 				/* switching to a new stream ID, let's send pending window updates */
-				if (h2c->rcvd_c) {
-					/* send WU for the connection */
-					ret = h2c_frt_window_update(h2c, 0, h2c->rcvd_c);
-					if (ret <= 0)
-						goto out_full_or_error;
-					h2c->rcvd_c = 0;
-				}
-
-				if (h2c->rcvd_s && h2c->dsi > 0) {
-					/* send WU for the stream */
-					ret = h2c_frt_window_update(h2c, h2c->dsi, h2c->rcvd_s);
-					if (ret <= 0)
-						goto out_full_or_error;
-					h2c->rcvd_s = 0;
-				}
+				ret = h2c_frt_send_window_updates(h2c);
+				if (ret <= 0)
+					goto out_full_or_error;
 			}
 
 			h2c->dfl = dfl;
@@ -727,21 +729,9 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 	 * a frame payload (hence before processing a frame header) so we
 	 * do not care much about the connection's state.
 	 */
-	if (h2c->rcvd_c) {
-		/* send WU for the connection */
-		ret = h2c_frt_window_update(h2c, 0, h2c->rcvd_c);
-		if (ret <= 0)
-			goto out_full_or_error;
-		h2c->rcvd_c = 0;
-	}
-
-	if (h2c->rcvd_s && h2c->dsi > 0) {
-		/* send WU for the stream */
-		ret = h2c_frt_window_update(h2c, h2c->dsi, h2c->rcvd_s);
-		if (ret <= 0)
-			goto out_full_or_error;
-		h2c->rcvd_s = 0;
-	}
+	ret = h2c_frt_send_window_updates(h2c);
+	if (ret <= 0)
+		goto out_full_or_error;
 
  out:
 	if ((req->flags & CF_SHUTW) && (si->state == SI_ST_EST) /*&& (appctx->st0 < CLI_ST_OUTPUT)*/) {
