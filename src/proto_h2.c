@@ -460,8 +460,45 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		goto fail;
 	}
 
+	if (appctx->st0 != H2_CS_ERROR && (h2c->rcvd_c || h2c->rcvd_s)) {
+		/* a final window update failed to be sent after processing
+		 * last frame. h2c->dsi wasn't reset yet, so we have to
+		 * complete the operation.
+		 */
+		if (h2c->rcvd_c) {
+			/* send WU for the connection */
+			ret = h2c_frt_window_update(h2c, 0, h2c->rcvd_c);
+			if (ret <= 0) {
+				if (!ret) {
+					h2c->flags |= H2_CF_BUFFER_FULL;
+					goto out;
+				}
+				h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+				goto error;
+			}
+			h2c->rcvd_c = 0;
+		}
+
+		if (h2c->rcvd_s && h2c->dsi > 0) {
+			/* send WU for the stream */
+			ret = h2c_frt_window_update(h2c, h2c->dsi, h2c->rcvd_s);
+			if (ret <= 0) {
+				if (!ret) {
+					h2c->flags |= H2_CF_BUFFER_FULL;
+					goto out;
+				}
+				h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+				goto error;
+			}
+			h2c->rcvd_s = 0;
+		}
+		/* we're done for sure now */
+		h2c->dsi = -1;
+	}
+
 	while (1) {
 		if (appctx->st0 == H2_CS_ERROR) {
+		error:
 			/* errcode is already filled, send GOAWAY now and
 			 * close. We also silently destroy any incoming data to
 			 * possibly unlock the sender and make it read pending data.
@@ -674,20 +711,6 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 				foo += frame_len;
 				fprintf(stderr, "stream=%d total = %u\n", h2c->dsi, foo);
 			}
-
-			if (h2c->rcvd_c) {
-				ret = h2c_frt_window_update(h2c, 0, h2c->rcvd_c);
-				if (ret <= 0)
-					break;
-				h2c->rcvd_c = 0;
-			}
-
-			if (h2c->rcvd_s) {
-				ret = h2c_frt_window_update(h2c, h2c->dsi, h2c->rcvd_s);
-				if (ret <= 0)
-					break;
-				h2c->rcvd_s = 0;
-			}
 #define DONT_CLOSE
 #ifndef DONT_CLOSE
 			// DATA not implemented yet
@@ -708,6 +731,35 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		}
 
 		bo_skip(req, frame_len);
+
+		if (h2c->rcvd_c) {
+			/* send WU for the connection */
+			ret = h2c_frt_window_update(h2c, 0, h2c->rcvd_c);
+			if (ret <= 0) {
+				if (!ret) {
+					h2c->flags |= H2_CF_BUFFER_FULL;
+					goto out;
+				}
+				h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+				goto error;
+			}
+			h2c->rcvd_c = 0;
+		}
+
+		if (h2c->rcvd_s && h2c->dsi > 0) {
+			/* send WU for the stream */
+			ret = h2c_frt_window_update(h2c, h2c->dsi, h2c->rcvd_s);
+			if (ret <= 0) {
+				if (!ret) {
+					h2c->flags |= H2_CF_BUFFER_FULL;
+					goto out;
+				}
+				h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+				goto error;
+			}
+			h2c->rcvd_s = 0;
+		}
+
 		h2c->dsi = -1;
 	}
 
