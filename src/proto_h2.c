@@ -525,6 +525,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			 * have been reset, so we'll have to do it whenever we
 			 * leave this block.
 			 */
+			int dfl, dft, dsi;
 
 			/* just for debugging */
 			if ((reql = bo_getblk(req, temp->str, req->buf->o, 0)) > 0) {
@@ -533,29 +534,67 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 				fprintf(stderr, "----------------------------\n");
 			}
 
-			reql = h2_get_frame_header(req, &h2c->dfl, &h2c->dft, &h2c->dsi);
+			reql = h2_peek_frame_header(req, &dfl, &dft, &dsi);
 			if (reql < 0) {
 				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
 				continue;
 			}
 
 			if (reql == 0)
-				goto out;
+				goto out_empty;
 
 			fprintf(stderr, "[%d] Received frame of %d bytes, type %d (%s), flags %02x, sid %d [max_id=%d]\n",
-				appctx->st0, h2c->dfl,
-				h2c->dft & 0xff, h2_ft_str(h2c->dft),
-				h2c->dft >> 8, h2c->dsi, h2c->max_id);
+				appctx->st0, dfl,
+				dft & 0xff, h2_ft_str(dft),
+				dft >> 8, dsi, h2c->max_id);
 
 			if (unlikely(appctx->st0 == H2_CS_SETTINGS1)) {
 				// supports a single frame type here
-				if (h2_ft(h2c->dft) != H2_FT_SETTINGS ||
-				    (h2_ff(h2c->dft) & H2_F_SETTINGS_ACK)) {
+				if (h2_ft(dft) != H2_FT_SETTINGS ||
+				    (h2_ff(dft) & H2_F_SETTINGS_ACK)) {
 					h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
 					continue;
 				}
 				appctx->st0 = H2_CS_FRAME_H;
 			}
+
+			/* appctx->st0 is H2_CS_FRAME_H now */
+			if (h2c->dsi != dsi && (h2c->rcvd_c || h2c->rcvd_s)) {
+				/* switching to a new stream ID, let's send pending window updates */
+				if (h2c->rcvd_c) {
+					/* send WU for the connection */
+					ret = h2c_frt_window_update(h2c, 0, h2c->rcvd_c);
+					if (ret <= 0) {
+						if (!ret) {
+							h2c->flags |= H2_CF_BUFFER_FULL;
+							goto out;
+						}
+						h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+						goto error;
+					}
+					h2c->rcvd_c = 0;
+				}
+
+				if (h2c->rcvd_s && h2c->dsi > 0) {
+					/* send WU for the stream */
+					ret = h2c_frt_window_update(h2c, h2c->dsi, h2c->rcvd_s);
+					if (ret <= 0) {
+						if (!ret) {
+							h2c->flags |= H2_CF_BUFFER_FULL;
+							goto out;
+						}
+						h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+						goto error;
+					}
+					h2c->rcvd_s = 0;
+				}
+			}
+
+			h2c->dfl = dfl;
+			h2c->dft = dft;
+			h2c->dsi = dsi;
+			h2_skip_frame_header(req);
+			appctx->st0 = H2_CS_FRAME_P;
 		}
 
 		/* read the incoming frame into temp->str. FIXME: for now we don't check the
@@ -569,7 +608,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 				continue;
 			}
 			fprintf(stderr, "[%d] Received incomplete frame (%d/%d bytes), waiting [cflags=0x%08x]\n", appctx->st0, req->buf->o, h2c->dfl, req->flags);
-			goto out;
+			goto out_empty;
 		}
 
 		if (frame_len > 0) {
@@ -733,34 +772,40 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 
 		bo_skip(req, frame_len);
 		appctx->st0 = H2_CS_FRAME_H;
+	}
 
-		if (h2c->rcvd_c) {
-			/* send WU for the connection */
-			ret = h2c_frt_window_update(h2c, 0, h2c->rcvd_c);
-			if (ret <= 0) {
-				if (!ret) {
-					h2c->flags |= H2_CF_BUFFER_FULL;
-					goto out;
-				}
-				h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
-				goto error;
+ out_empty:
+	/* Nothing more to read. We may have to send window updates for the
+	 * current stream. We can only have rcvd_c/s valid after processing
+	 * a frame payload (hence before processing a frame header) so we
+	 * do not care much about the connection's state.
+	 */
+	if (h2c->rcvd_c) {
+		/* send WU for the connection */
+		ret = h2c_frt_window_update(h2c, 0, h2c->rcvd_c);
+		if (ret <= 0) {
+			if (!ret) {
+				h2c->flags |= H2_CF_BUFFER_FULL;
+				goto out;
 			}
-			h2c->rcvd_c = 0;
+			h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+			goto error;
 		}
+		h2c->rcvd_c = 0;
+	}
 
-		if (h2c->rcvd_s && h2c->dsi > 0) {
-			/* send WU for the stream */
-			ret = h2c_frt_window_update(h2c, h2c->dsi, h2c->rcvd_s);
-			if (ret <= 0) {
-				if (!ret) {
-					h2c->flags |= H2_CF_BUFFER_FULL;
-					goto out;
-				}
-				h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
-				goto error;
+	if (h2c->rcvd_s && h2c->dsi > 0) {
+		/* send WU for the stream */
+		ret = h2c_frt_window_update(h2c, h2c->dsi, h2c->rcvd_s);
+		if (ret <= 0) {
+			if (!ret) {
+				h2c->flags |= H2_CF_BUFFER_FULL;
+				goto out;
 			}
-			h2c->rcvd_s = 0;
+			h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+			goto error;
 		}
+		h2c->rcvd_s = 0;
 	}
 
  out:
