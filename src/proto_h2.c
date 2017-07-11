@@ -486,16 +486,6 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		goto fail;
 	}
 
-	if (appctx->st0 != H2_CS_ERROR) {
-		/* a final window update failed to be sent after processing
-		 * last frame. h2c->dsi wasn't reset yet, so we have to
-		 * complete the operation.
-		 */
-		ret = h2c_frt_send_window_updates(h2c);
-		if (ret <= 0)
-			goto out_full_or_error;
-	}
-
 	while (1) {
 		if (appctx->st0 == H2_CS_ERROR)
 			goto error;
