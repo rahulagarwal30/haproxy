@@ -385,10 +385,6 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 	if (!s)
 		goto out_free_task;
 
-	/* FIXME: use channel_alloc_buffer() later with a soft retry */
-	if (!b_alloc_margin(&s->req.buf, global.tune.reserved_bufs))
-		goto out_free_strm;
-
 //	/* The tasks below are normally what is supposed to be done by
 //	 * fe->accept().
 //	 */
@@ -408,10 +404,10 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 	return h2s;
 
 	/* Error unrolling */
- out_free_strm:
-	LIST_DEL(&s->by_sess);
-	LIST_DEL(&s->list);
-	pool_free2(pool2_stream, s);
+// out_free_strm:
+//	LIST_DEL(&s->by_sess);
+//	LIST_DEL(&s->list);
+//	pool_free2(pool2_stream, s);
  out_free_task:
 	task_free(t);
  out_free_appctx:
@@ -468,29 +464,48 @@ static int h2c_frt_handle_headers(struct h2c *h2c, const char *payload, struct c
 	if (h2_ff(h2c->dft) & H2_F_HEADERS_PRIORITY)
 		fprintf(stderr, "[4] HEADERS with PRIORITY\n");
 
-	if (h2c->dsi <= h2c->max_id) {
+	h2s = h2c_st_by_id(h2c, h2c->dsi);
+	fprintf(stderr, "    [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
+
+	if (h2s->st != H2_SS_IDLE) {
+		/* stream already exists, we might just be coming back from a
+		 * previously failed allocation.
+		 */
+		if (h2s->st != H2_SS_INIT) {
+			fprintf(stderr, "    received headers frame at state %s for stream %d!", h2_ss_str(h2s->st), h2c->dsi);
+			h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+		}
+	}
+	else if (h2c->dsi <= h2c->max_id) {
 		fprintf(stderr, "    reused ID %d (max_id=%d)!", h2c->dsi, h2c->max_id);
 		h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
 		return -1;
 	}
+	else {
+		h2s = h2c_stream_new(h2c, h2c->dsi);
+		if (!h2s) {
+			fprintf(stderr, "    failed to allocate h2s stream for ID %d!", h2c->dsi);
+			h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+			return -1;
+		}
+		h2s->st = H2_SS_INIT;
+	}
 
-	h2s = h2c_st_by_id(h2c, h2c->dsi);
-	fprintf(stderr, "    [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
+	/* If we fail the buffer allocation here, we'll pause the parsing in
+	 * the connection and resume in the stream, going through the code path
+	 * corresponding to H2_SS_INIT.
+	 */
+	if (si_ic(h2s->appctx->owner)->buf == &buf_empty &&
+	    !channel_alloc_buffer(si_ic(h2s->appctx->owner), &h2s->appctx->buffer_wait)) {
+		si_applet_cant_put(h2s->appctx->owner);
+		return 0;
+	}
 
-	/* FIXME: check here if we're coming back for a paused stream which was waiting for a buffer */
-
-	h2s = h2c_stream_new(h2c, h2c->dsi);
 	h2s->st = H2_SS_OPEN;
 	if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM)
 		h2s->st = H2_SS_HREM;
 
-	/* FIXME: try to allocate a buffer here first. If it fails, abort now in hope to come back
-	 * once it's allocated. We need to do it this way so that the child stream is the one
-	 * in charge for getting its own buffer via its appctx. The h2s applet will wake up and
-	 * maybe we can complete the operation there or we can decide to pin the buffer and to
-	 * wake up the h2c.
-	 */
-	fprintf(stderr, " [newh2s=%p:%s]\n", h2s, h2s ? h2_ss_str(h2s->st) : "idle");
+	fprintf(stderr, " [newh2s=%p:%s]\n", h2s, h2_ss_str(h2s->st));
 
 	if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM) {
 		// FIXME: ignore PAD, StreamDep and PRIO for now
