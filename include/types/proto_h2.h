@@ -43,6 +43,7 @@ enum h2_cs {
 /* H2 stream state, in h2s->st */
 enum h2_ss {
 	H2_SS_IDLE = 0, // idle
+	H2_SS_INIT,     // allocation attempted
 	H2_SS_RLOC,     // reserved(local)
 	H2_SS_RREM,     // reserved(remote)
 	H2_SS_OPEN,     // open

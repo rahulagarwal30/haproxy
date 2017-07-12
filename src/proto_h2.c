@@ -76,6 +76,7 @@ const char *h2_ft_strings[H2_FT_ENTRIES] = {
 
 const char *h2_ss_strings[H2_SS_ENTRIES] = {
 	[H2_SS_IDLE]   = "idle",
+	[H2_SS_INIT]   = "init", /* not part of the spec */
 	[H2_SS_RLOC]   = "reserved(local)",
 	[H2_SS_RREM]   = "reserved(remote)",
 	[H2_SS_OPEN]   = "open",
