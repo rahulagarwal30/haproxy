@@ -981,9 +981,13 @@ int h2c_frt_init(struct stream *s)
 static void h2s_frt_io_handler(struct appctx *appctx)
 {
 	struct stream_interface *si = appctx->owner;
+	struct h2s *h2s = appctx->ctx.h2s.ctx;
+	struct h2c *h2c = h2s->h2c;
 
 	/* FIXME: to do later */
-	fprintf(stderr, "in %s\n", __FUNCTION__);
+	fprintf(stderr, "in %s : h2s=%p h2c=%p\n", __FUNCTION__, h2s, h2c);
+
+	h2c_frt_process_frames(h2c, h2s);
 
 	si_applet_cant_get(si);
 	si_applet_stop_put(si);
