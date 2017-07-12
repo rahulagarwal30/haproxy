@@ -593,6 +593,179 @@ static int h2c_frt_handle_data(struct h2c *h2c, const char *payload, int plen)
 	return 1;
 }
 
+/* processes more incoming frames for connection <h2c>, limiting this to stream
+ * <only_h2s> if non-null. It is designed to be called from both sides to make
+ * progress on the connection, either when releasing some room on the stream
+ * side, or when new data arrive on the connection side. Return values are :
+ *   -1 : error already set on the connection
+ *    0 : had to stop (buffer full, end of input stream, etc)
+ *    1 : need to let the h2c handler verify and take action (eg: other stream).
+ */
+static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
+{
+	struct appctx *appctx = h2c->appctx;
+	struct stream_interface *si = appctx->owner;
+	struct channel *req = si_oc(si);
+	struct chunk *outbuf = NULL;
+	struct chunk *in = NULL;
+	int frame_len;
+	int ret;
+
+	in = alloc_trash_chunk();
+	if (!in)
+		goto error;
+
+	outbuf = alloc_trash_chunk();
+	if (!outbuf)
+		goto error;
+
+	while (1) {
+		if (appctx->st0 == H2_CS_ERROR)
+			goto error;
+
+		if (appctx->st0 == H2_CS_FRAME_H || appctx->st0 == H2_CS_SETTINGS1) {
+			/* we need to read a new frame. h2c->dsi might not yet
+			 * have been reset, so we'll have to do it whenever we
+			 * leave this block.
+			 */
+			int dfl, dft, dsi;
+
+			/* just for debugging */
+			if ((ret = bo_getblk(req, in->str, req->buf->o, 0)) > 0) {
+				fprintf(stderr, "[%d] -- %d bytes received ---\n", appctx->st0, ret);
+				debug_hexdump(stderr, "[H2RD] ", in->str, 0, ret);
+				fprintf(stderr, "----------------------------\n");
+			}
+
+			ret = h2_peek_frame_header(req, &dfl, &dft, &dsi);
+			if (ret < 0) {
+				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+				goto error;
+			}
+
+			if (ret == 0)
+				goto out_empty;
+
+			fprintf(stderr, "[%d] Received frame of %d bytes, type %d (%s), flags %02x, sid %d [max_id=%d]\n",
+				appctx->st0, dfl,
+				dft & 0xff, h2_ft_str(dft),
+				dft >> 8, dsi, h2c->max_id);
+
+			if (unlikely(appctx->st0 == H2_CS_SETTINGS1)) {
+				/* supports a single frame type here */
+				if (h2_ft(dft) != H2_FT_SETTINGS ||
+				    (h2_ff(dft) & H2_F_SETTINGS_ACK)) {
+					h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+					goto error;
+				}
+				appctx->st0 = H2_CS_FRAME_H;
+			}
+
+			/* appctx->st0 is H2_CS_FRAME_H now */
+			if (h2c->dsi != dsi) {
+				/* switching to a new stream ID, let's send pending window updates */
+				ret = h2c_frt_send_window_updates(h2c);
+				if (ret <= 0)
+					goto done;
+			}
+
+			h2c->dfl = dfl;
+			h2c->dft = dft;
+			h2c->dsi = dsi;
+			h2_skip_frame_header(req);
+			appctx->st0 = H2_CS_FRAME_P;
+		}
+
+		/* if we're in the context of a stream, stop when facing another one */
+		if (only_h2s && h2c->dsi != only_h2s->id)
+			goto wakeup;
+
+		/* read the incoming frame into in->str. FIXME: for now we don't check the
+		 * frame length but it's limited by the fact that we read into a trash buffer.
+		 */
+		frame_len = bo_getblk(req, in->str, h2c->dfl, 0);
+		if (h2c->dfl && frame_len <= 0) {
+			if (frame_len < 0 || req->buf->o == req->buf->size) {
+				fprintf(stderr, "[%d] Truncated frame payload: %d/%d bytes read only\n", appctx->st0, req->buf->o, h2c->dfl);
+				h2c_error(h2c, H2_ERR_FRAME_SIZE_ERROR);
+				goto error;
+			}
+			fprintf(stderr, "[%d] Received incomplete frame (%d/%d bytes), waiting [cflags=0x%08x]\n", appctx->st0, req->buf->o, h2c->dfl, req->flags);
+			goto out_empty;
+		}
+
+		if (frame_len > 0) {
+			fprintf(stderr, "[%d] Frame payload: %d bytes :\n", appctx->st0, h2c->dfl);
+			debug_hexdump(stderr, "[H2RD] ", in->str, 0, h2c->dfl);
+			fprintf(stderr, "--------------\n");
+		}
+
+		switch (h2_ft(h2c->dft)) {
+		case H2_FT_SETTINGS:
+			ret = h2c_frt_handle_settings(h2c);
+			break;
+
+		case H2_FT_PING:
+			ret = h2c_frt_handle_ping(h2c, in->str);
+			break;
+
+		case H2_FT_PRIORITY:
+			ret = h2c_frt_handle_priority(h2c, in->str);
+			break;
+
+		case H2_FT_HEADERS:
+			ret = h2c_frt_handle_headers(h2c, in->str, outbuf);
+			break;
+
+		case H2_FT_DATA:
+			ret = h2c_frt_handle_data(h2c, in->str, frame_len);
+			break;
+		default:
+			ret = 1; // assume success for frames that we ignore. 0=yield, <0=fail.
+		}
+
+		if (ret <= 0)
+			goto done;
+
+		bo_skip(req, frame_len);
+		appctx->st0 = H2_CS_FRAME_H;
+	}
+
+ out_empty:
+	/* Nothing more to read. We may have to send window updates for the
+	 * current stream. We can only have rcvd_c/s valid after processing
+	 * a frame payload (hence before processing a frame header) so we
+	 * do not care much about the connection's state.
+	 */
+	ret = h2c_frt_send_window_updates(h2c);
+
+ done:
+	/* branch here for all cases of ret <= 0 where 0 means "can't write,
+	 * output full" and <0 means internal error, and >0 simply means "done".
+	 */
+	if (ret < 0) {
+		h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
+		goto error;
+	}
+	if (!ret)
+		h2c->flags |= H2_CF_BUFFER_FULL;
+
+	free_trash_chunk(outbuf);
+	free_trash_chunk(in);
+	return 0;
+
+ error:
+	free_trash_chunk(outbuf);
+	free_trash_chunk(in);
+	return -1;
+
+ wakeup:
+	free_trash_chunk(outbuf);
+	free_trash_chunk(in);
+	return 1;
+}
+
+
 /* This I/O handler runs as an applet embedded in a stream interface. It is
  * used to send HTTP stats over a TCP socket. The mechanism is very simple.
  * appctx->st0 contains the operation in progress (dump, done). The handler
@@ -604,17 +777,11 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 	struct h2c *h2c = appctx->ctx.h2c.ctx;
 	struct channel *req = si_oc(si);
 	struct channel *res = si_ic(si);
-	struct chunk *temp = NULL;
-	struct chunk *outbuf = NULL;
-	int reql;
+	char preface[sizeof(h2_conn_preface)];
 	int ret;
-	int frame_len;
 
 	if (unlikely(si->state == SI_ST_DIS || si->state == SI_ST_CLO))
 		goto out;
-
-	temp = alloc_trash_chunk();
-	outbuf = alloc_trash_chunk();
 
 	h2c->flags &= ~H2_CF_BUFFER_FULL;
 
@@ -629,16 +796,16 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 	}
 
 	if (appctx->st0 == H2_CS_PREFACE) {
-		reql = bo_getblk(req, temp->str, sizeof(h2_conn_preface), 0);
-		if (reql < 0)
+		ret = bo_getblk(req, preface, sizeof(h2_conn_preface), 0);
+		if (ret < 0)
 			goto fail;
-		if (reql == 0)
+		if (ret == 0)
 			goto out;
 
-		if (reql != sizeof(h2_conn_preface) ||
-		    memcmp(temp->str, h2_conn_preface, sizeof(h2_conn_preface)) != 0) {
-			fprintf(stderr, "[%d] Received bad preface (%d bytes) :\n", appctx->st0, reql);
-			debug_hexdump(stderr, "[H2RD] ", temp->str, 0, reql);
+		if (ret != sizeof(h2_conn_preface) ||
+		    memcmp(preface, h2_conn_preface, sizeof(h2_conn_preface)) != 0) {
+			fprintf(stderr, "[%d] Received bad preface (%d bytes) :\n", appctx->st0, ret);
+			debug_hexdump(stderr, "[H2RD] ", preface, 0, ret);
 			fprintf(stderr, "--------------\n");
 			si_shutr(si);
 			res->flags |= CF_READ_NULL;
@@ -646,133 +813,27 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 			goto out;
 		}
 
-		bo_skip(req, reql);
-		fprintf(stderr, "[%d] H2: preface found (%d bytes)!\n", appctx->st0, reql);
+		bo_skip(req, ret);
+		fprintf(stderr, "[%d] H2: preface found (%d bytes)!\n", appctx->st0, ret);
 		appctx->st0 = H2_CS_SETTINGS1;
 	}
 
-	if (appctx->st0 == H2_CS_ERROR2) {
-		/* must never happen */
-		goto fail;
-	}
-
-	while (1) {
-		if (appctx->st0 == H2_CS_ERROR)
+	if (appctx->st0 != H2_CS_ERROR2 && appctx->st0 != H2_CS_ERROR) {
+		ret = h2c_frt_process_frames(h2c, NULL);
+		switch (ret) {
+		case -1: /* error met, error code already set */
 			goto error;
-
-		if (appctx->st0 == H2_CS_FRAME_H || appctx->st0 == H2_CS_SETTINGS1) {
-			/* we need to read a new frame. h2c->dsi might not yet
-			 * have been reset, so we'll have to do it whenever we
-			 * leave this block.
-			 */
-			int dfl, dft, dsi;
-
-			/* just for debugging */
-			if ((reql = bo_getblk(req, temp->str, req->buf->o, 0)) > 0) {
-				fprintf(stderr, "[%d] -- %d bytes received ---\n", appctx->st0, reql);
-				debug_hexdump(stderr, "[H2RD] ", temp->str, 0, reql);
-				fprintf(stderr, "----------------------------\n");
-			}
-
-			reql = h2_peek_frame_header(req, &dfl, &dft, &dsi);
-			if (reql < 0) {
-				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
-				goto error;
-			}
-
-			if (reql == 0)
-				goto out_empty;
-
-			fprintf(stderr, "[%d] Received frame of %d bytes, type %d (%s), flags %02x, sid %d [max_id=%d]\n",
-				appctx->st0, dfl,
-				dft & 0xff, h2_ft_str(dft),
-				dft >> 8, dsi, h2c->max_id);
-
-			if (unlikely(appctx->st0 == H2_CS_SETTINGS1)) {
-				// supports a single frame type here
-				if (h2_ft(dft) != H2_FT_SETTINGS ||
-				    (h2_ff(dft) & H2_F_SETTINGS_ACK)) {
-					h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
-					goto error;
-				}
-				appctx->st0 = H2_CS_FRAME_H;
-			}
-
-			/* appctx->st0 is H2_CS_FRAME_H now */
-			if (h2c->dsi != dsi) {
-				/* switching to a new stream ID, let's send pending window updates */
-				ret = h2c_frt_send_window_updates(h2c);
-				if (ret <= 0)
-					goto out_full_or_error;
-			}
-
-			h2c->dfl = dfl;
-			h2c->dft = dft;
-			h2c->dsi = dsi;
-			h2_skip_frame_header(req);
-			appctx->st0 = H2_CS_FRAME_P;
+		case 0:  /* can't make progress (input empty, output full) ; flags already updated */
+			goto out;
 		}
-
-		/* read the incoming frame into temp->str. FIXME: for now we don't check the
-		 * frame length but it's limited by the fact that we read into a trash buffer.
-		 */
-		frame_len = bo_getblk(req, temp->str, h2c->dfl, 0);
-		if (h2c->dfl && frame_len <= 0) {
-			if (frame_len < 0 || req->buf->o == req->buf->size) {
-				fprintf(stderr, "[%d] Truncated frame payload: %d/%d bytes read only\n", appctx->st0, req->buf->o, h2c->dfl);
-				h2c_error(h2c, H2_ERR_FRAME_SIZE_ERROR);
-				goto error;
-			}
-			fprintf(stderr, "[%d] Received incomplete frame (%d/%d bytes), waiting [cflags=0x%08x]\n", appctx->st0, req->buf->o, h2c->dfl, req->flags);
-			goto out_empty;
-		}
-
-		if (frame_len > 0) {
-			fprintf(stderr, "[%d] Frame payload: %d bytes :\n", appctx->st0, h2c->dfl);
-			debug_hexdump(stderr, "[H2RD] ", temp->str, 0, h2c->dfl);
-			fprintf(stderr, "--------------\n");
-		}
-
-		switch (h2_ft(h2c->dft)) {
-		case H2_FT_SETTINGS:
-			ret = h2c_frt_handle_settings(h2c);
-			break;
-
-		case H2_FT_PING:
-			ret = h2c_frt_handle_ping(h2c, temp->str);
-			break;
-
-		case H2_FT_PRIORITY:
-			ret = h2c_frt_handle_priority(h2c, temp->str);
-			break;
-
-		case H2_FT_HEADERS:
-			ret = h2c_frt_handle_headers(h2c, temp->str, outbuf);
-			break;
-
-		case H2_FT_DATA:
-			ret = h2c_frt_handle_data(h2c, temp->str, frame_len);
-			break;
-		default:
-			ret = 1; // assume success for frames that we ignore. 0=yield, <0=fail.
-		}
-
-		if (ret <= 0)
-			goto out_full_or_error;
-
-		bo_skip(req, frame_len);
-		appctx->st0 = H2_CS_FRAME_H;
+		/* here we catch other return codes including the wake up code */
 	}
 
- out_empty:
-	/* Nothing more to read. We may have to send window updates for the
-	 * current stream. We can only have rcvd_c/s valid after processing
-	 * a frame payload (hence before processing a frame header) so we
-	 * do not care much about the connection's state.
-	 */
-	ret = h2c_frt_send_window_updates(h2c);
-	if (ret <= 0)
-		goto out_full_or_error;
+	if (appctx->st0 == H2_CS_ERROR2) /* must never happen */
+		goto fail;
+
+	if (appctx->st0 == H2_CS_ERROR)
+		goto error;
 
  out:
 	if ((req->flags & CF_SHUTW) && (si->state == SI_ST_EST) /*&& (appctx->st0 < CLI_ST_OUTPUT)*/) {
@@ -785,19 +846,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		si_shutr(si);
 		res->flags |= CF_READ_NULL;
 	}
-	free_trash_chunk(outbuf);
-	free_trash_chunk(temp);
 	return;
-
- out_full_or_error:
-	/* branch here for all cases of ret <= 0 where 0 means "can't write,
-	 * output full" and <0 means internal error.
-	 */
-	if (!ret) {
-		h2c->flags |= H2_CF_BUFFER_FULL;
-		goto out;
-	}
-	h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
 
  error:
 	/* errcode is already filled, send GOAWAY now and
@@ -823,9 +872,6 @@ static void h2c_frt_io_handler(struct appctx *appctx)
  fail:
 	si_shutr(si);
 	si_shutw(si);
-	free_trash_chunk(outbuf);
-	free_trash_chunk(temp);
-	return;
 }
 
 static void h2c_frt_release_handler(struct appctx *appctx)
