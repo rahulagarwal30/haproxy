@@ -766,16 +766,40 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 	if (!ret)
 		h2c->flags |= H2_CF_BUFFER_FULL;
 
+	/* when called from the H2S side we need to make sure data will
+	 * move on the H2C side.
+	 */
+	if (only_h2s) {
+		si_applet_wake_cb(si);
+		channel_release_buffer(si_ic(si), &appctx->buffer_wait);
+	}
+
 	free_trash_chunk(outbuf);
 	free_trash_chunk(in);
 	return 0;
 
  error:
+	/* when called from the H2S side we need to make sure data will
+	 * move on the H2C side.
+	 */
+	if (only_h2s) {
+		si_applet_wake_cb(si);
+		channel_release_buffer(si_ic(si), &appctx->buffer_wait);
+	}
+
 	free_trash_chunk(outbuf);
 	free_trash_chunk(in);
 	return -1;
 
  wakeup:
+	/* when called from the H2S side we need to make sure data will
+	 * move on the H2C side.
+	 */
+	if (only_h2s) {
+		si_applet_wake_cb(si);
+		channel_release_buffer(si_ic(si), &appctx->buffer_wait);
+	}
+
 	free_trash_chunk(outbuf);
 	free_trash_chunk(in);
 	return 1;
