@@ -609,6 +609,42 @@ static int h2c_frt_handle_data(struct h2c *h2c, const char *payload, int plen)
 	return 1;
 }
 
+/* try to send a fake HTTP HEADERS response for stream id <sid>.
+ * Returns 0 if not possible yet, <0 on error, >0 on success.
+ */
+static int h2c_frt_fake_resp(struct h2c *h2c, int sid)
+{
+	struct appctx *appctx = h2c->appctx;
+	struct stream_interface *si = appctx->owner;
+	struct channel *res = si_ic(si);
+	char str[200];
+	int ret = -1;
+
+	if (h2c_mux_busy(h2c))
+		goto end;
+
+	if ((res->buf == &buf_empty) &&
+	    !channel_alloc_buffer(res, &appctx->buffer_wait)) {
+		si_applet_cant_put(si);
+		goto end;
+	}
+
+	/* len: 5, type: 1(HEADERS), flags: ENDS+ENDH=5 */
+	memcpy(str, "\x00\x00\x05\x01\x05", 5);
+	h2_u32_encode(str + 5, sid);
+	/* payload */
+	memcpy(str + 9,
+	       "\x48"               //   indexed name: idx8=":status"
+	       "\x03\x32\x30\x30"   // literal value = "200"
+	       , 5);
+	ret = bi_putblk(res, str, 14);
+ end:
+	fprintf(stderr, "[%d] sent fake response (%d) = %d\n", appctx->st0, sid, ret);
+
+	/* success: >= 0 ; wait: -1; failure: < -1 */
+	return ret + 1;
+}
+
 /* processes more incoming frames for connection <h2c>, limiting this to stream
  * <only_h2s> if non-null. It is designed to be called from both sides to make
  * progress on the connection, either when releasing some room on the stream
@@ -624,8 +660,10 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 	struct channel *req = si_oc(si);
 	struct chunk *outbuf = NULL;
 	struct chunk *in = NULL;
+	struct h2s *h2s;
 	int frame_len;
 	int ret;
+	int sid;
 
 	in = alloc_trash_chunk();
 	if (!in)
@@ -634,6 +672,24 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 	outbuf = alloc_trash_chunk();
 	if (!outbuf)
 		goto error;
+
+	while (!LIST_ISEMPTY(&h2c->active_list) && (!only_h2s || h2c->active_list.n == &only_h2s->list)) {
+		h2s = LIST_ELEM(h2c->active_list.n, struct h2s *, list);
+		sid = h2s->id;
+
+		fprintf(stderr, "trying to process response from stream %p (id=%d)\n", h2s, sid);
+		ret = h2c_frt_fake_resp(h2c, sid);
+
+		if (ret < 0) {
+			h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+			goto error;
+		}
+
+		if (ret == 0) // buffer full, stop sending
+			break;
+		LIST_DEL(h2c->active_list.n);
+		LIST_INIT(h2c->active_list.n);
+	}
 
 	while (1) {
 		if (appctx->st0 == H2_CS_ERROR)
