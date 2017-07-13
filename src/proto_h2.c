@@ -982,15 +982,18 @@ int h2c_frt_init(struct stream *s)
 static void h2s_frt_io_handler(struct appctx *appctx)
 {
 	struct stream_interface *si = appctx->owner;
+	struct channel *req = si_ic(si);
 	struct channel *res = si_oc(si);
 	struct h2s *h2s = appctx->ctx.h2s.ctx;
 	struct h2c *h2c = h2s->h2c;
 
 	/* FIXME: to do later */
-	fprintf(stderr, "in %s : h2s=%p h2c=%p\n", __FUNCTION__, h2s, h2c);
+	fprintf(stderr, "in %s : h2s=%p h2c=%p req->i=%d res->o=%d res->i=%d\n", __FUNCTION__, h2s, h2c, req->buf->i, res->buf->o, res->buf->i);
 
 	if (res->buf->o || (res->flags & CF_SHUTW))
 		LIST_ADDQ(&h2c->active_list, &h2s->list);
+
+	debug_hexdump(stderr, "[H1RD] ", res->buf->data, 0, res->buf->o);
 
 	h2c_frt_process_frames(h2c, h2s);
 
