@@ -956,6 +956,7 @@ int h2c_frt_init(struct stream *s)
 	h2c->dsi = -1;
 	h2c->msi = -1;
 	h2c->streams_by_id = EB_ROOT_UNIQUE;
+	LIST_INIT(&h2c->active_list);
 
 	/* Now we can schedule the applet. */
 	si_applet_cant_get(&s->si[1]);
@@ -981,13 +982,22 @@ int h2c_frt_init(struct stream *s)
 static void h2s_frt_io_handler(struct appctx *appctx)
 {
 	struct stream_interface *si = appctx->owner;
+	struct channel *res = si_oc(si);
 	struct h2s *h2s = appctx->ctx.h2s.ctx;
 	struct h2c *h2c = h2s->h2c;
 
 	/* FIXME: to do later */
 	fprintf(stderr, "in %s : h2s=%p h2c=%p\n", __FUNCTION__, h2s, h2c);
 
+	if (res->buf->o || (res->flags & CF_SHUTW))
+		LIST_ADDQ(&h2c->active_list, &h2s->list);
+
 	h2c_frt_process_frames(h2c, h2s);
+
+	if (!res->buf->o && !(res->flags & CF_SHUTW)) {
+		LIST_DEL(&h2s->list);
+		LIST_INIT(&h2s->list);
+	}
 
 	si_applet_cant_get(si);
 	si_applet_stop_put(si);
@@ -995,8 +1005,12 @@ static void h2s_frt_io_handler(struct appctx *appctx)
 
 static void h2s_frt_release_handler(struct appctx *appctx)
 {
+	struct h2s *h2s = appctx->ctx.h2s.ctx;
+
 	/* FIXME: to do later */
 	fprintf(stderr, "in %s\n", __FUNCTION__);
+	if (!LIST_ISEMPTY(&h2s->list))
+		LIST_DEL(&h2s->list);
 }
 
 __attribute__((constructor))
