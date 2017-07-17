@@ -37,6 +37,7 @@
 #include <proto/channel.h>
 #include <proto/cli.h>
 #include <proto/frontend.h>
+#include <proto/hdr_idx.h>
 #include <proto/hpack-dec.h>
 #include <proto/hpack-hdr.h>
 #include <proto/log.h>
@@ -609,19 +610,33 @@ static int h2c_frt_handle_data(struct h2c *h2c, const char *payload, int plen)
 	return 1;
 }
 
-/* try to send a fake HTTP HEADERS response for stream id <sid>.
- * Returns 0 if not possible yet, <0 on error, >0 on success.
+/* try to send a HEADERS frame matching HTTP/1 txn <h1> for stream id <sid>
+ * over connection <h2c>, and using <outbuf> as a temporary buffer. Returns
+ * 0 if not possible yet, <0 on error, >0 on success.
  */
-static int h2c_frt_fake_resp(struct h2c *h2c, int sid)
+static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, const struct http_txn *h1, struct chunk *in, struct chunk *outbuf)
 {
 	struct appctx *appctx = h2c->appctx;
 	struct stream_interface *si = appctx->owner;
 	struct channel *res = si_ic(si);
-	char str[200];
+	char *eol, *sol, *col, *sov, *eov;
+	struct ist name, value;
+	int cur_idx;
 	int ret = -1;
 
 	if (h2c_mux_busy(h2c))
 		goto end;
+
+	/* check against incomplete H1 responses (should not happen) */
+	if (h1->rsp.msg_state < HTTP_MSG_BODY)
+		goto end;
+
+	/* try to read response headers */
+	chunk_reset(in);
+	if ((in->len = bo_getblk(h1->rsp.chn, in->str, h1->rsp.chn->buf->o, 0)) <= 0)
+		goto end;
+
+	sol = in->str;
 
 	if ((res->buf == &buf_empty) &&
 	    !channel_alloc_buffer(res, &appctx->buffer_wait)) {
@@ -629,17 +644,106 @@ static int h2c_frt_fake_resp(struct h2c *h2c, int sid)
 		goto end;
 	}
 
-	/* len: 5, type: 1(HEADERS), flags: ENDS+ENDH=5 */
-	memcpy(str, "\x00\x00\x05\x01\x05", 5);
-	h2_u32_encode(str + 5, sid);
-	/* payload */
-	memcpy(str + 9,
-	       "\x48"               //   indexed name: idx8=":status"
-	       "\x03\x32\x30\x30"   // literal value = "200"
-	       , 5);
-	ret = bi_putblk(res, str, 14);
+	chunk_reset(outbuf);
+
+	/* len: 0x000000 (fill later), type: 1(HEADERS), flags: ENDS+ENDH=5 */
+	memcpy(outbuf->str, "\x00\x00\x00\x01\x05", 5);
+	h2_u32_encode(outbuf->str + 5, sid); // 4 bytes
+
+	/* frame payload starts at str + 9 */
+	outbuf->str[9]  = 0x48; //   indexed name: idx8=":status"
+	outbuf->str[10] = 0x03; //   3 bytes status
+
+	/* we're taking the status from the HTTP/1.1 TXN, hoping it's always
+	 * valid. We also have the status code present as pure text at position
+	 * (sol + h1->rsp.sl.st.c) for (h1->rsp.sl.st.c_l) bytes, but only if
+	 * the response was not produced by haproxy (it was parsed) so better
+	 * rely on the status.
+	 */
+	outbuf->str[11] = '0' + (h1->status / 100) % 10;
+	outbuf->str[12] = '0' + (h1->status / 10) % 10;
+	outbuf->str[13] = '0' + (h1->status / 1) % 10;
+	outbuf->len = 14;
+
+	/* regular headers start to be dumped at outbuf->str + len. We iterate
+	 * over all of them and drop the connection-specific ones. For now they
+	 * are all sent as pure literals.
+	 */
+
+	sol += hdr_idx_first_pos(&h1->hdr_idx);
+	cur_idx = hdr_idx_first_idx(&h1->hdr_idx);
+
+	while (cur_idx) {
+		eol = sol + h1->hdr_idx.v[cur_idx].len;
+		col = sol;
+		while (col < eol && *col != ':')
+			col++;
+
+		sov = col + 1;
+		while (sov < eol && HTTP_IS_LWS(*sov))
+			sov++;
+
+		eov = eol;
+		while (eov - 1 > sov && HTTP_IS_LWS(*(eov - 1)))
+			eov--;
+
+		/* we have the header name between sol and col (excluded), and
+		 * its value between sov and eov (excluded).
+		 */
+		name  = (sol < col) ? ist2(sol, col - sol) : ist("");
+		value = (sov < eov) ? ist2(sov, eov - sov) : ist("");
+
+		/* the name must be lower-case */
+		for (sol = name.ptr; sol < name.ptr + name.len; sol++)
+			if (isupper((unsigned char)*sol))
+				*sol = tolower(*sol);
+
+		/* RFC7540 #8.1.2.2.  Connection-Specific Header Fields
+		 * An endpoint MUST NOT generate an HTTP/2 message containing
+		 * connection-specific header fields; ...
+		 * This means that an intermediary transforming an HTTP/1.x
+		 * message to HTTP/2 will need to remove any header fields
+		 * nominated by the Connection header field, along with the
+		 * Connection header field itself. Such intermediaries SHOULD
+		 * also remove other connection-specific header fields, such
+		 * as Keep-Alive, Proxy-Connection, Transfer-Encoding, and
+		 * Upgrade, even if they are not nominated by the Connection
+		 * header field.
+		 */
+		if (!isteq(name, ist("connection")) &&
+		    !isteq(name, ist("proxy-connection")) &&
+		    !isteq(name, ist("keep-alive")) &&
+		    !isteq(name, ist("upgrade")) &&
+		    !isteq(name, ist("transfer-encoding"))) {
+			outbuf->str[outbuf->len++] = 0x00;      /* literal without indexing -- new name */
+			outbuf->str[outbuf->len++] = name.len;  /* bogus, limited to 7 bits for now */
+			memcpy(outbuf->str + outbuf->len, name.ptr, name.len);
+			outbuf->len += name.len;
+			outbuf->str[outbuf->len++] = value.len;  /* bogus, limited to 7 bits for now */
+			memcpy(outbuf->str + outbuf->len, value.ptr, value.len);
+			outbuf->len += value.len;
+		}
+
+		sol = eol + h1->hdr_idx.v[cur_idx].cr + 1;
+		cur_idx = h1->hdr_idx.v[cur_idx].next;
+	}
+
+	/* skip optional CR and LF */
+	if (sol < in->str + in->len && *sol == '\r')
+		sol++;
+
+	if (sol < in->str + in->len && *sol == '\n')
+		sol++;
+
+	/* update the frame's size */
+	h2_set_frame_size(outbuf->str, outbuf->len - 9);
+	ret = bi_putblk(res, outbuf->str, outbuf->len);
+
+	/* consume incoming H1 response */
+	if (ret > 0)
+		bo_skip(h1->rsp.chn, sol - in->str);
  end:
-	fprintf(stderr, "[%d] sent fake response (%d) = %d\n", appctx->st0, sid, ret);
+	fprintf(stderr, "[%d] sent simple H2 response (sid=%d) = %d bytes (%d in)\n", appctx->st0, sid, ret, (int)(sol - in->str));
 
 	/* success: >= 0 ; wait: -1; failure: < -1 */
 	return ret + 1;
@@ -661,6 +765,8 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 	struct chunk *outbuf = NULL;
 	struct chunk *in = NULL;
 	struct h2s *h2s;
+	struct stream *h1s;
+	struct http_txn *h1;
 	int frame_len;
 	int ret;
 	int sid;
@@ -676,9 +782,16 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 	while (!LIST_ISEMPTY(&h2c->active_list) && (!only_h2s || h2c->active_list.n == &only_h2s->list)) {
 		h2s = LIST_ELEM(h2c->active_list.n, struct h2s *, list);
 		sid = h2s->id;
-
-		fprintf(stderr, "trying to process response from stream %p (id=%d)\n", h2s, sid);
-		ret = h2c_frt_fake_resp(h2c, sid);
+		h1s = si_strm(h2s->appctx->owner);
+		h1 = h1s->txn;
+		if (!h1) {
+			fprintf(stderr, "Stream %p (id=%d h1s=%p) has a NULL TXN so is apparently closed. Deleting it from the active list.\n", h2s, sid, h1s);
+			LIST_DEL(h2c->active_list.n);
+			LIST_INIT(h2c->active_list.n);
+			continue;
+		}
+		fprintf(stderr, "trying to process response from stream %p (id=%d) h1s=%p h1txn=%p hdr_idx=%p\n", h2s, sid, h1s, h1, &h1->hdr_idx);
+		ret = h2c_frt_make_resp_headers(h2c, sid, h1, in, outbuf);
 
 		if (ret < 0) {
 			h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
