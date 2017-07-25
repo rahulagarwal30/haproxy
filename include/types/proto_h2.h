@@ -84,6 +84,11 @@ enum h2_ft {
 #define H2_CF_NONE              0x00000000
 #define H2_CF_BUFFER_FULL       0x00000001  // connection's buffer was full
 
+/* HTTP/2 stream flags (32 bit), in h2s->flags */
+#define H2_SF_NONE              0x00000000
+#define H2_SF_ES_RCVD           0x00000001
+#define H2_SF_ES_SENT           0x00000002
+
 
 /* flags defined for each frame type */
 
@@ -160,6 +165,7 @@ struct h2s {
 	struct eb32_node by_id; /* place in h2c's streams_by_id */
 	struct list list; /* position in active/blocked lists if blocked>0 */
 	int32_t id; /* stream ID */
+	uint32_t flags;      /* H2_SF_* */
 	enum h2_err errcode; /* H2 err code (H2_ERR_*) */
 	enum h2_ss st;
 	uint8_t rst;

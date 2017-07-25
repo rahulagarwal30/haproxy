@@ -359,6 +359,7 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 		goto out;
 
 	h2s->h2c       = h2c;
+	h2s->flags     = H2_SF_NONE;
 	h2s->errcode   = H2_ERR_NO_ERROR;
 	h2s->st        = H2_SS_IDLE;
 	h2s->rst       = H2_RST_NONE;
