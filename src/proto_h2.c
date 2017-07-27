@@ -21,6 +21,7 @@
 
 #include <sys/types.h>
 
+#include <common/cfgparse.h>
 #include <common/chunk.h>
 #include <common/compat.h>
 #include <common/config.h>
@@ -139,6 +140,9 @@ const struct h2s *h2_idle_stream = &(const struct h2s){
 	.rst       = H2_RST_NONE,
 	.id        = 0,
 };
+
+/* a few global settings */
+static int h2_settings_header_table_size      =  4096; /* initial value */
 
 /* try to send a settings frame on the connection. Returns 0 if not possible
  * yet, <0 on error, >0 on success.
@@ -1441,7 +1445,7 @@ int h2c_frt_init(struct stream *s)
 	if (!h2c)
 		goto fail;
 
-	h2c->ddht = hpack_dht_alloc(4096);
+	h2c->ddht = hpack_dht_alloc(h2_settings_header_table_size);
 	if (!h2c->ddht)
 		goto fail;
 
@@ -1526,9 +1530,32 @@ static void h2s_frt_release_handler(struct appctx *appctx)
 		LIST_DEL(&h2s->list);
 }
 
+/* config parser for global "tune.h2.header-table-size" */
+static int h2_parse_header_table_size(char **args, int section_type, struct proxy *curpx,
+                                      struct proxy *defpx, const char *file, int line,
+                                      char **err)
+{
+	if (too_many_args(1, args, err, NULL))
+		return -1;
+
+	h2_settings_header_table_size = atoi(args[1]);
+	if (h2_settings_header_table_size < 4096 || h2_settings_header_table_size > 65536) {
+		memprintf(err, "'%s' expects a numeric value between 4096 and 65536.", args[0]);
+		return -1;
+	}
+	return 0;
+}
+
+/* config keyword parsers */
+static struct cfg_kw_list cfg_kws = {ILH, {
+	{ CFG_GLOBAL, "tune.h2.header-table-size",      h2_parse_header_table_size      },
+	{ 0, NULL, NULL }
+}};
+
 __attribute__((constructor))
 static void __h2_init(void)
 {
 	pool2_h2c = create_pool("h2c", sizeof(struct h2c), MEM_F_SHARED);
 	pool2_h2s = create_pool("h2s", sizeof(struct h2s), MEM_F_SHARED);
+	cfg_register_keywords(&cfg_kws);
 }
