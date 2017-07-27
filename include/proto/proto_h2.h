@@ -127,6 +127,16 @@ static inline void h2_u32_encode(void *str, uint32_t v)
 #endif
 }
 
+/* writes the 24-bit frame size <len> at address <frame> */
+static inline void h2_set_frame_size(void *frame, uint32_t len)
+{
+	uint8_t *out = frame;
+
+	out[0] = len >> 16;
+	out[1] = len >>  8;
+	out[2] = len >>  0;
+}
+
 /* returns a const string giving the name of frame type <type>. It may contain
  * the flags which are ignored.
  */
