@@ -147,13 +147,15 @@ static int h2_settings_initial_window_size    = 65535; /* initial value */
 static int h2_settings_max_concurrent_streams =   100;
 
 /* try to send a settings frame on the connection. Returns 0 if not possible
- * yet, <0 on error, >0 on success.
+ * yet, <0 on error, >0 on success. See RFC7540#11.3 for the various codes.
  */
 static int h2c_frt_snd_settings(struct h2c *h2c)
 {
 	struct appctx *appctx = h2c->appctx;
 	struct stream_interface *si = appctx->owner;
 	struct channel *res = si_ic(si);
+	char buf_data[100]; // enough for 15 settings
+	struct chunk buf;
 	int ret = -1;
 
 	if (h2c_mux_busy(h2c))
@@ -165,10 +167,39 @@ static int h2c_frt_snd_settings(struct h2c *h2c)
 		goto end;
 	}
 
-	ret = bi_putblk(res,
-			"\x00\x00\x00"     /* length : 0 (no data)  */
-			"\x04" "\x00"      /* type   : 4, flags : 0 */
-			"\x00\x00\x00\x00" /* stream ID */, 9);
+	chunk_init(&buf, buf_data, sizeof(buf_data));
+	chunk_memcpy(&buf,
+	       "\x00\x00\x00"      /* length    : 0 for now */
+	       "\x04\x00"          /* type      : 4 (settings), flags : 0 */
+	       "\x00\x00\x00\x00", /* stream ID : 0 */
+	       9);
+
+	if (h2_settings_header_table_size != 4096) {
+		char str[6] = "\x00\x01"; /* header_table_size */
+
+		h2_u32_encode(str + 2, h2_settings_header_table_size);
+		chunk_memcat(&buf, str, 6);
+	}
+
+	if (h2_settings_initial_window_size != 65535) {
+		char str[6] = "\x00\x04"; /* initial_window_size */
+
+		h2_u32_encode(str + 2, h2_settings_initial_window_size);
+		chunk_memcat(&buf, str, 6);
+	}
+
+	if (h2_settings_max_concurrent_streams != 0) {
+		char str[6] = "\x00\x03"; /* max_concurrent_streams */
+
+		/* Note: 0 means "unlimited" for haproxy's config but not for
+		 * the protocol, so never send this value!
+		 */
+		h2_u32_encode(str + 2, h2_settings_max_concurrent_streams);
+		chunk_memcat(&buf, str, 6);
+	}
+
+	h2_set_frame_size(buf.str, buf.len - 9);
+	ret = bi_putchk(res, &buf);
 
  end:
 	fprintf(stderr, "[%d] sent settings = %d\n", appctx->st0, ret);
