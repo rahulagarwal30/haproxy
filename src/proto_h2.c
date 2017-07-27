@@ -407,6 +407,7 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 		goto out;
 
 	h2s->h2c       = h2c;
+	h2s->mws       = h2c->miw;
 	h2s->flags     = H2_SF_NONE;
 	h2s->errcode   = H2_ERR_NO_ERROR;
 	h2s->st        = H2_SS_IDLE;
@@ -1513,6 +1514,8 @@ int h2c_frt_init(struct stream *s)
 	h2c->flags = H2_CF_NONE;
 	h2c->dsi = -1;
 	h2c->msi = -1;
+	h2c->miw = 65535; /* mux initial window size */
+	h2c->mws = 65535; /* mux window size */
 	h2c->streams_by_id = EB_ROOT_UNIQUE;
 	LIST_INIT(&h2c->active_list);
 

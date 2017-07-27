@@ -156,6 +156,8 @@ struct h2c {
 	int msi; /* mux stream ID (<0 = idle) */
 	int mfl; /* mux frame length (if dsi >= 0) */
 	int mft; /* mux frame type (+ flags) (if dsi >= 0) */
+	int miw; /* mux initial window size for all new streams */
+	int mws; /* mux window size. Can be negative. */
 };
 
 /* H2 stream descriptor */
@@ -166,6 +168,7 @@ struct h2s {
 	struct list list; /* position in active/blocked lists if blocked>0 */
 	int32_t id; /* stream ID */
 	uint32_t flags;      /* H2_SF_* */
+	int mws;             /* mux window size for this stream */
 	enum h2_err errcode; /* H2 err code (H2_ERR_*) */
 	enum h2_ss st;
 	uint8_t rst;
