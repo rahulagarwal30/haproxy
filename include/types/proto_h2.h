@@ -135,6 +135,14 @@ enum h2_err {
 	H2_ERR_HTTP_1_1_REQUIRED   = 0xd,
 } __attribute__((packed));
 
+// RFC7540 #11.3 : Settings Registry
+#define H2_SETTINGS_HEADER_TABLE_SIZE      0x0001
+#define H2_SETTINGS_ENABLE_PUSH            0x0002
+#define H2_SETTINGS_MAX_CONCURRENT_STREAMS 0x0003
+#define H2_SETTINGS_INITIAL_WINDOW_SIZE    0x0004
+#define H2_SETTINGS_MAX_FRAME_SIZE         0x0005
+#define H2_SETTINGS_MAX_HEADER_LIST_SIZE   0x0006
+
 /* H2 connection descriptor */
 struct h2c {
 	struct appctx *appctx;

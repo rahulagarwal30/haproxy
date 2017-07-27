@@ -470,14 +470,70 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 	return h2s;
 }
 
-/* processes a SETTINGS frame and ACKs it if needed. Returns 0 if not possible
- * yet, <0 on error, >0 on success.
+/* Increase all streams' outgoing window size by the difference passed in
+ * argument. This is needed upon receipt of the settings frame if the initial
+ * window size is different. The difference may be negative and the resulting
+ * window size as well, for the time it takes to receive some window updates.
  */
-static int h2c_frt_handle_settings(struct h2c *h2c)
+static void h2c_update_all_ws(struct h2c *h2c, int diff)
 {
-	if (!(h2_ff(h2c->dft) & H2_F_SETTINGS_ACK))
-		return h2c_frt_ack_settings(h2c);
-	return 1;
+	struct h2s *h2s;
+	struct eb32_node *node;
+
+	if (!diff)
+		return;
+
+	node = eb32_first(&h2c->streams_by_id);
+	while (node) {
+		h2s = container_of(node, struct h2s, by_id);
+		h2s->mws += diff;
+		node = eb32_next(node);
+	}
+}
+
+/* processes a SETTINGS frame whose payload is <payload> for <plen> bytes, and
+ * ACKs it if needed. Returns 0 if not possible yet, <0 on error, >0 on success.
+ */
+static int h2c_frt_handle_settings(struct h2c *h2c, const char *payload, int plen)
+{
+	if ((h2_ff(h2c->dft) & H2_F_SETTINGS_ACK))
+		return 1;
+
+	if (h2c->dsi != 0) {
+		/* settings apply to connection */
+		h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+		return -1;
+	}
+
+	if (h2c->dfl % 6) {
+		/* frame length must be multiple of 6 */
+		h2c_error(h2c, H2_ERR_FRAME_SIZE_ERROR);
+		return -1;
+	}
+
+	/* process full frame only */
+	if (plen < h2c->dfl)
+		return 0;
+
+	/* parse the frame */
+	while (plen > 0) {
+		uint16_t type = h2_u16_decode(payload);
+		int32_t  arg  = h2_u32_decode(payload + 2);
+
+		switch (type) {
+		case H2_SETTINGS_INITIAL_WINDOW_SIZE:
+			/* we need to update all existing streams with the
+			 * difference from the previous iws.
+			 */
+			h2c_update_all_ws(h2c, arg - h2c->miw);
+			h2c->miw = arg;
+			break;
+		}
+		payload += 6;
+		plen -= 6;
+	}
+
+	return h2c_frt_ack_settings(h2c);
 }
 
 /* processes a PING frame and ACKs it if needed. The caller must pass the
@@ -1253,7 +1309,7 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 
 		switch (h2_ft(h2c->dft)) {
 		case H2_FT_SETTINGS:
-			ret = h2c_frt_handle_settings(h2c);
+			ret = h2c_frt_handle_settings(h2c, in->str, frame_len);
 			break;
 
 		case H2_FT_PING:
