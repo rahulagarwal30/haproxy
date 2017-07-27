@@ -39,6 +39,88 @@ extern const struct h2s *h2_idle_stream;
 
 int h2c_frt_init(struct stream *s);
 
+/* reads a 32-bit value at position <str> using big-endian encoding and returns
+ * it. The caller guarantees there are enough data.
+ */
+static inline uint32_t h2_u32_decode(const void *str)
+{
+#if defined(__x86_64__) ||					\
+    defined(__i386__) || defined(__i486__) || defined(__i586__) || defined(__i686__) || \
+    defined(__ARM_ARCH_7A__)
+	/* unaligned accesses are OK */
+	return ntohl(*(uint32_t *)str);
+#else
+	/* no unaligned accesses */
+	uint8_t *in = str;
+
+	return ((uint32_t)in[0] << 24) |
+	       ((uint32_t)in[1] << 16) |
+	       ((uint32_t)in[2] <<  8) |
+	        (uint32_t)in[3];
+#endif
+}
+
+/* reads a 16-bit value at position <str> using big-endian encoding and returns
+ * it. The caller guarantees there are enough data.
+ */
+static inline uint16_t h2_u16_decode(const void *str)
+{
+#if defined(__x86_64__) ||					\
+    defined(__i386__) || defined(__i486__) || defined(__i586__) || defined(__i686__) || \
+    defined(__ARM_ARCH_7A__)
+	/* unaligned accesses are OK */
+	return ntohs(*(uint16_t *)str);
+#else
+	/* no unaligned accesses */
+	uint8_t *in = str;
+
+	return ((uint16_t)in[2] <<  8) | (uint16_t)in[3];
+#endif
+}
+
+/* writes 32-bit value <v> at position <str> in big-endian encoding. The caller
+ * guarantees there is enough room.
+ */
+static inline void h2_u32_encode(void *str, uint32_t v)
+{
+#if defined(__x86_64__) ||                                              \
+    defined(__i386__) || defined(__i486__) || defined(__i586__) || defined(__i686__) || \
+    defined(__ARM_ARCH_7A__)
+	/* unaligned accesses are OK */
+	uint32_t *out = str;
+	*out = htonl(v);
+#else
+	/* no unaligned accesses */
+	uint8_t *out = str;
+	uint16_t vh = v >> 16; // help the compiler
+
+	out[3] = v;
+	out[1] = vh;
+	out[2] = v >> 8;
+	out[0] = vh >> 8;
+#endif
+}
+
+/* writes 16-bit value <v> at position <str> in big-endian encoding. The caller
+ * guarantees there is enough room.
+ */
+static inline void h2_u16_encode(void *str, uint16_t v)
+{
+#if defined(__x86_64__) ||                                              \
+    defined(__i386__) || defined(__i486__) || defined(__i586__) || defined(__i686__) || \
+    defined(__ARM_ARCH_7A__)
+	/* unaligned accesses are OK */
+	uint16_t *out = str;
+	*out = htonl(v);
+#else
+	/* no unaligned accesses */
+	uint8_t *out = str;
+
+	out[1] = v;
+	out[0] = v >> 8;
+#endif
+}
+
 /* Peeks frame headers from the next H2 frame and stores the length in <len>,
  * the flags and the type in <type> ((flags << 8) | type), and the stream ID in
  * <sid>. The channel is *not* automatically advanced, it's up to the caller to
@@ -69,7 +151,7 @@ static inline int h2_peek_frame_header(struct channel *chn, int *len, int *type,
 
 	*len  = (ptr[0] << 16) + (ptr[1] << 8) + ptr[2];
 	*type = (ptr[4] << 8) + ptr[3];
-	*sid  = ((ptr[5] << 24) + (ptr[6] << 16) + (ptr[7] << 8) + ptr[8]) & 0x7fffffff;
+	*sid  = h2_u32_decode(ptr + 5) & 0x7fffffff;
 	return 1;
 }
 
@@ -102,29 +184,6 @@ static inline int h2_ft(int type)
 static inline int h2_ff(int type)
 {
 	return (type >> 8) & 0xff;
-}
-
-/* writes 32-bit value <v> at position <str> in big-endian encoding. The caller
- * guarantees there is enough room.
- */
-static inline void h2_u32_encode(void *str, uint32_t v)
-{
-#if defined(__x86_64__) ||                                              \
-    defined(__i386__) || defined(__i486__) || defined(__i586__) || defined(__i686__) || \
-    defined(__ARM_ARCH_7A__)
-	/* unaligned accesses are OK */
-	uint32_t *out = str;
-	*out = htonl(v);
-#else
-	/* no unaligned accesses */
-	uint8_t *out = str;
-	uint16_t vh = v >> 16; // help the compiler
-
-	out[3] = v;
-	out[1] = vh;
-	out[2] = v >> 8;
-	out[0] = vh >> 8;
-#endif
 }
 
 /* writes the 24-bit frame size <len> at address <frame> */
