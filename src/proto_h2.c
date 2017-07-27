@@ -536,6 +536,50 @@ static int h2c_frt_handle_settings(struct h2c *h2c, const char *payload, int ple
 	return h2c_frt_ack_settings(h2c);
 }
 
+/* processes a WINDOW_UPDATE frame whose payload is <payload> for <plen> bytes.
+ * Returns 0 if not possible yet, <0 on error, >0 on success.
+ */
+static int h2c_frt_handle_window_update(struct h2c *h2c, const char *payload, int plen)
+{
+	int32_t inc;
+
+	if (h2c->dfl != 4) {
+		/* frame length must be exactly 4 */
+		h2c_error(h2c, H2_ERR_FRAME_SIZE_ERROR);
+		return -1;
+	}
+
+	/* process full frame only */
+	if (plen < h2c->dfl)
+		return 0;
+
+	/* parse the frame */
+	inc = h2_u32_decode(payload);
+
+	if (inc == 0) {
+		/* FIXME: this is incorrect, the spec says that it is a
+		 * connection error only if sent to the connection,
+		 * otherwise it's a stream error.
+		 */
+		h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+		return -1;
+	}
+
+	if (h2c->dsi != 0) {
+		struct h2s *h2s = h2c_st_by_id(h2c, h2c->dsi);
+
+		/* it's not an error to receive WU on a closed stream, though
+		 * it's uncertain (but harmless) on an idle one.
+		 */
+		if (h2s->st != H2_SS_IDLE && h2s->st != H2_SS_CLOSED)
+			h2s->mws += inc;
+	}
+	else
+		h2c->mws += inc;
+
+	return 1;
+}
+
 /* processes a PING frame and ACKs it if needed. The caller must pass the
  * pointer to the payload in <payload>. Returns 0 if not possible yet, <0 on
  * error, >0 on success.
@@ -1327,6 +1371,11 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 		case H2_FT_DATA:
 			ret = h2c_frt_handle_data(h2c, in->str, frame_len);
 			break;
+
+		case H2_FT_WINDOW_UPDATE:
+			ret = h2c_frt_handle_window_update(h2c, in->str, frame_len);
+			break;
+
 		default:
 			ret = 1; // assume success for frames that we ignore. 0=yield, <0=fail.
 		}
