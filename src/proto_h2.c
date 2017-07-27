@@ -144,6 +144,7 @@ const struct h2s *h2_idle_stream = &(const struct h2s){
 /* a few global settings */
 static int h2_settings_header_table_size      =  4096; /* initial value */
 static int h2_settings_initial_window_size    = 65535; /* initial value */
+static int h2_settings_max_concurrent_streams =   100;
 
 /* try to send a settings frame on the connection. Returns 0 if not possible
  * yet, <0 on error, >0 on success.
@@ -1563,10 +1564,27 @@ static int h2_parse_initial_window_size(char **args, int section_type, struct pr
 	return 0;
 }
 
+/* config parser for global "tune.h2.max-concurrent-streams" */
+static int h2_parse_max_concurrent_streams(char **args, int section_type, struct proxy *curpx,
+                                           struct proxy *defpx, const char *file, int line,
+                                           char **err)
+{
+	if (too_many_args(1, args, err, NULL))
+		return -1;
+
+	h2_settings_max_concurrent_streams = atoi(args[1]);
+	if (h2_settings_max_concurrent_streams < 0) {
+		memprintf(err, "'%s' expects a positive numeric value.", args[0]);
+		return -1;
+	}
+	return 0;
+}
+
 /* config keyword parsers */
 static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_GLOBAL, "tune.h2.header-table-size",      h2_parse_header_table_size      },
 	{ CFG_GLOBAL, "tune.h2.initial-window-size",    h2_parse_initial_window_size    },
+	{ CFG_GLOBAL, "tune.h2.max-concurrent-streams", h2_parse_max_concurrent_streams },
 	{ 0, NULL, NULL }
 }};
 
