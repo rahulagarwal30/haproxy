@@ -1337,7 +1337,9 @@ tune.bufsize <number>
   parameter should be decreased by the same factor as this one is increased.
   If HTTP request is larger than (tune.bufsize - tune.maxrewrite), haproxy will
   return HTTP 400 (Bad Request) error. Similarly if an HTTP response is larger
-  than this size, haproxy will return HTTP 502 (Bad Gateway).
+  than this size, haproxy will return HTTP 502 (Bad Gateway). Additionally,
+  HTTP/2's MAX_FRAME_SIZE setting will reflect this value and clients will
+  abort on values lower than 16384.
 
 tune.chksize <number>
   Sets the check buffer size to this size (in bytes). Higher values may help

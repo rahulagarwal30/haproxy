@@ -198,6 +198,17 @@ static int h2c_frt_snd_settings(struct h2c *h2c)
 		chunk_memcat(&buf, str, 6);
 	}
 
+	if (global.tune.bufsize != 16384) {
+		char str[6] = "\x00\x05"; /* max_frame_size */
+
+		/* note: similarly we could also emit MAX_HEADER_LIST_SIZE to
+		 * match bufsize - rewrite size, but at the moment it seems
+		 * that clients don't take care of it.
+		 */
+		h2_u32_encode(str + 2, global.tune.bufsize);
+		chunk_memcat(&buf, str, 6);
+	}
+
 	h2_set_frame_size(buf.str, buf.len - 9);
 	ret = bi_putchk(res, &buf);
 
