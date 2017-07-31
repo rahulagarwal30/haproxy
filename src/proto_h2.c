@@ -1199,6 +1199,7 @@ static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, struct h2m *h2m, 
 	struct channel *res = si_ic(si);
 	int ret = -1;
 	int skip = 0;
+	int es_now = 0;
 
 	if (h2c_mux_busy(h2c))
 		goto end;
@@ -1211,8 +1212,8 @@ static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, struct h2m *h2m, 
 
 	chunk_reset(outbuf);
 
-	/* len: 0x000000 (fill later), type: 1(HEADERS), flags: ENDS+ENDH=5 */
-	memcpy(outbuf->str, "\x00\x00\x00\x01\x05", 5);
+	/* len: 0x000000 (fill later), type: 1(HEADERS), flags: ENDH=4 */
+	memcpy(outbuf->str, "\x00\x00\x00\x01\x04", 5);
 	h2_u32_encode(outbuf->str + 5, sid); // 4 bytes
 	outbuf->len = 9;
 
@@ -1225,13 +1226,29 @@ static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, struct h2m *h2m, 
 	}
 	skip = ret;
 
+	/* we may need to add END_STREAM */
+	if ((((h2m->flags & (H2_MF_CLEN | H2_MF_CHNK)) == H2_MF_CLEN) && !h2m->body_len) || h2m->chn->flags & CF_SHUTW)
+		es_now = 1;
+
 	/* update the frame's size */
 	h2_set_frame_size(outbuf->str, outbuf->len - 9);
+
+	if (es_now)
+		outbuf->str[4] |= H2_F_HEADERS_END_STREAM;
+
 	ret = bi_putblk(res, outbuf->str, outbuf->len);
 
 	/* consume incoming H1 response */
-	if (ret > 0)
+	if (ret > 0) {
 		bo_skip(h2m->chn, skip);
+		/* for now we don't implemented CONTINUATION, so we wait for a
+		 * body or directly end in TRL2.
+		 */
+		if (es_now)
+			h2m->state = H2_MS_TRL2;
+		else
+			h2m->state = H2_MS_BODY;
+	}
 
  end:
 	fprintf(stderr, "[%d] sent simple H2 response (sid=%d) = %d bytes (%d in, ep=%u, es=%s)\n", appctx->st0, sid, ret, skip, h2m->err_pos, http_msg_state_str(h2m->err_state));
@@ -1274,12 +1291,28 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 		sid = h2s->id;
 		h1s = si_strm(h2s->appctx->owner);
 		fprintf(stderr, "trying to process response from stream %p (id=%d) h1s=%p\n", h2s, sid, h1s);
-		ret = h2c_frt_make_resp_headers(h2c, sid, &h2s->res, outbuf);
 
-		if (ret < 0) {
-			h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
-			goto error;
-		}
+		do {
+			switch (h2s->res.state) {
+			case H2_MS_HDR0:
+			case H2_MS_HDR1: /* not used right now */
+				ret = h2c_frt_make_resp_headers(h2c, sid, &h2s->res, outbuf);
+				break;
+			case H2_MS_TRL2: /* this is the end */
+				LIST_DEL(h2c->active_list.n);
+				LIST_INIT(h2c->active_list.n);
+				ret = 0;
+				break;
+			default:
+				ret = -1; // state should never happen
+				break;
+			}
+
+			if (ret < 0) {
+				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+				goto error;
+			}
+		} while (ret > 0 && h2s->res.state != H2_MS_TRL2);
 
 		if (ret == 0) // buffer full, stop sending
 			break;
