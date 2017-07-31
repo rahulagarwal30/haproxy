@@ -1234,7 +1234,7 @@ static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, struct h2m *h2m, 
 	skip = ret;
 
 	/* we may need to add END_STREAM */
-	if ((((h2m->flags & (H2_MF_CLEN | H2_MF_CHNK)) == H2_MF_CLEN) && !h2m->body_len) || h2m->chn->flags & CF_SHUTW)
+	if (((h2m->flags & H2_MF_CLEN) && !h2m->body_len) || h2m->chn->flags & CF_SHUTW)
 		es_now = 1;
 
 	/* update the frame's size */
@@ -1264,6 +1264,130 @@ static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, struct h2m *h2m, 
 	return ret + 1;
 }
 
+/* Try to send a DATA frame matching HTTP/1 response present in the response
+ * channel attached to <h2m>, for stream id <sid> over connection <h2c>, and
+ * using <outbuf> as a temporary output buffer. Returns 0 if not possible yet,
+ * <0 on error, >0 on success.
+ */
+static int h2c_frt_make_resp_data(struct h2c *h2c, struct h2s *h2s, struct chunk *outbuf)
+{
+	struct appctx *appctx = h2c->appctx;
+	struct stream_interface *si = appctx->owner;
+	struct h2m *h2m = &h2s->res;
+	struct channel *res = si_ic(si);
+	int ret = -1;
+	int es_now = 0;
+	int size = 0;
+
+	if (h2c_mux_busy(h2c))
+		goto end;
+
+	if ((res->buf == &buf_empty) &&
+	    !channel_alloc_buffer(res, &appctx->buffer_wait)) {
+		si_applet_cant_put(si);
+		goto end;
+	}
+
+	chunk_reset(outbuf);
+
+	/* len: 0x000000 (fill later), type: 0(DATA), flags: none=0 */
+	memcpy(outbuf->str, "\x00\x00\x00\x00\x00", 5);
+	h2_u32_encode(outbuf->str + 5, h2s->id); // 4 bytes
+	outbuf->len = 9;
+
+	switch (h2m->flags & (H2_MF_CLEN|H2_MF_CHNK)) {
+	case 0:           /* no content length, read till SHUTW */
+		size = h2m->chn->buf->o;
+		break;
+	case H2_MF_CLEN:  /* content-length: read only h2m->body_len */
+		size = h2m->chn->buf->o;
+		if ((long long)size > h2m->curr_len)
+			size = h2m->curr_len;
+		break;
+	default:          /* te:chunked : parse chunks */
+		ret = -2; // FIXME: chunk not done for now
+		goto end;
+	}
+
+	/* we have in <size> the exact number of bytes we need to copy from
+	 * the H1 buffer. We need to check this against the connection's and
+	 * the stream's send windows, and to ensure that this fits in the max
+	 * frame size and in the buffer's available space minus 9 bytes (for
+	 * the frame header). The connection's flow control is applied last so
+	 * that we can use a separate list of streams which are immediately
+	 * unblocked on window opening. Note: we don't implement padding.
+	 */
+	if (size > h2s->mws)
+		size = h2s->mws;
+
+	if (h2c->mfs && size > h2c->mfs)
+		size = h2c->mfs;
+
+	if (size + 9 > outbuf->size)
+		size = outbuf->size - 9;
+
+	if (size + 9 > res->buf->size)
+		size = res->buf->size - 9;
+
+	if (size <= 0)
+		goto blocked_strm;
+
+	if (size > h2c->mws)
+		size = h2c->mws;
+
+	if (size <= 0)
+		goto blocked_conn;
+
+	/* copy whatever we can */
+
+	ret = bo_getblk(h2m->chn, outbuf->str + outbuf->len, size, 0);
+	if (ret <= 0 || ret != size) {
+		/* FIXME: must never happen */
+		ret = -2;
+		goto end;
+	}
+
+	/* we may need to add END_STREAM */
+	/* FIXME: bug below, CF_SHUTW must not be considered if size was trimmed to fit the output buffer */
+	if (((h2m->flags & H2_MF_CLEN) && !(h2m->curr_len - size)) || (h2m->chn->flags & CF_SHUTW))
+		es_now = 1;
+
+	/* update the frame's size */
+	h2_set_frame_size(outbuf->str, size);
+
+	if (es_now)
+		outbuf->str[4] |= H2_F_DATA_END_STREAM;
+
+	ret = bi_putblk(res, outbuf->str, size + 9);
+
+	/* consume incoming H1 response */
+	if (ret > 0) {
+		bo_skip(h2m->chn, size);
+		h2m->curr_len -= size;
+		h2s->mws -= size;
+		h2c->mws -= size;
+		/* no trailers for now */
+		if (es_now)
+			h2m->state = H2_MS_TRL2;
+	}
+
+ end:
+	fprintf(stderr, "[%d] sent simple H2 DATA response (sid=%d) = %d bytes (%d in, ep=%u, es=%s, h2cws=%d h2sws=%d)\n", appctx->st0, h2s->id, ret, size, h2m->err_pos, http_msg_state_str(h2m->err_state), h2c->mws, h2s->mws);
+
+	/* success: >= 0 ; wait: -1; failure: < -1 */
+	return ret + 1;
+
+ blocked_conn:
+	/* FIXME: subscribe to blocked list */
+	fprintf(stderr, "### blocked_conn\n");
+	return 0;
+
+ blocked_strm:
+	/* FIXME: subscribe to blocked list */
+	fprintf(stderr, "### blocked_strm\n");
+	return 0;
+}
+
 /* try to process active streams which are waiting for the connections to be
  * usable. Returns < 0 on error, 0 if nothing was done, > 0 on success.
  */
@@ -1291,6 +1415,9 @@ static int h2c_frt_process_active(struct h2c *h2c, struct h2s *only_h2s, struct 
 				LIST_DEL(h2c->active_list.n);
 				LIST_INIT(h2c->active_list.n);
 				ret = 0;
+				break;
+			case H2_MS_BODY:
+				ret = h2c_frt_make_resp_data(h2c, h2s, outbuf);
 				break;
 			default:
 				ret = -1; // state should never happen
