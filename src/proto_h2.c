@@ -530,6 +530,13 @@ static int h2c_frt_handle_settings(struct h2c *h2c, const char *payload, int ple
 			h2c_update_all_ws(h2c, arg - h2c->miw);
 			h2c->miw = arg;
 			break;
+		case H2_SETTINGS_MAX_FRAME_SIZE:
+			if (arg < 16384 || arg > 16777215) { // RFC7540#6.5.2
+				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+				return -1;
+			}
+			h2c->mfs = arg;
+			break;
 		}
 		payload += 6;
 		plen -= 6;
@@ -1671,6 +1678,7 @@ int h2c_frt_init(struct stream *s)
 	h2c->msi = -1;
 	h2c->miw = 65535; /* mux initial window size */
 	h2c->mws = 65535; /* mux window size */
+	h2c->mfs = 16384; /* initial max frame size */
 	h2c->streams_by_id = EB_ROOT_UNIQUE;
 	LIST_INIT(&h2c->active_list);
 

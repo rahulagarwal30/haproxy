@@ -181,6 +181,7 @@ struct h2c {
 	int mft; /* mux frame type (+ flags) (if dsi >= 0) */
 	int miw; /* mux initial window size for all new streams */
 	int mws; /* mux window size. Can be negative. */
+	int mfs; /* mux's max frame size */
 };
 
 /* H2 message descriptor */
