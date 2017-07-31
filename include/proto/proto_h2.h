@@ -251,6 +251,19 @@ static inline struct h2s *h2c_st_by_id(struct h2c *h2c, int id)
 	return h2s;
 }
 
+/* initializes an H2 message */
+static inline struct h2m *h2m_init(struct h2m *h2m, struct channel *chn)
+{
+	h2m->state = H2_MS_HDR0;
+	h2m->flags = 0;
+	h2m->curr_len = 0;
+	h2m->body_len = 0;
+	h2m->err_pos = 0;
+	h2m->err_state = 0;
+	h2m->chn = chn;
+	return h2m;
+}
+
 #endif /* _PROTO_PROTO_H2_H */
 
 /*

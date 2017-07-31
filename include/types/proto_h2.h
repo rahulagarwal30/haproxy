@@ -24,6 +24,7 @@
 
 #include <common/config.h>
 #include <eb32tree.h>
+#include <types/channel.h>
 #include <types/hpack-hdr.h>
 #include <types/stream.h>
 #include <types/task.h>
@@ -51,6 +52,15 @@ enum h2_ss {
 	H2_SS_HLOC,     // half-closed(local)
 	H2_SS_CLOSED,   // closed
 	H2_SS_ENTRIES   // must be last
+} __attribute__((packed));
+
+/* HTTP/2 message states */
+enum h2_ms {
+	H2_MS_HDR0 = 0, // before first HEADERS frame, HEADERS expected
+	H2_MS_HDR1,     // non-final HEADERS frame seen, CONT expected
+	H2_MS_BODY,     // final HEADERS frame seen, DATA expected
+	H2_MS_TRL1,     // non-final HEADERS frame seen after DATA (trailers)
+	H2_MS_TRL2,     // final HEADERS frame seen after DATA (trailers)
 } __attribute__((packed));
 
 /* H2 stream reset notifications, in h2s->rst */
@@ -88,6 +98,11 @@ enum h2_ft {
 #define H2_SF_NONE              0x00000000
 #define H2_SF_ES_RCVD           0x00000001
 #define H2_SF_ES_SENT           0x00000002
+
+/* HTTP/2 message flags (32 bit), in h2m->flags */
+#define H2_MF_NONE              0x00000000
+#define H2_MF_CLEN              0x00000001 // content-length present
+#define H2_MF_CHNK              0x00000002 // chunk present, exclusive with c-l
 
 
 /* flags defined for each frame type */
@@ -168,10 +183,22 @@ struct h2c {
 	int mws; /* mux window size. Can be negative. */
 };
 
+/* H2 message descriptor */
+struct h2m {
+	enum h2_ms state;    // H2 message state (H2_MS_*)
+	uint32_t flags;      // H2_MF_*
+	uint64_t curr_len;   // content-length or last chunk length
+	uint64_t body_len;   // total known size of the body length
+	int err_pos;         // position in the byte stream of the first error (H1 or H2)
+	int err_state;       // state where the first error was met (H1 or H2)
+	struct channel *chn; // channel holding the clear-text HTTP message
+};
+
 /* H2 stream descriptor */
 struct h2s {
 	struct appctx *appctx;
 	struct h2c *h2c;
+	struct h2m req, res; /* request and response parser state */
 	struct eb32_node by_id; /* place in h2c's streams_by_id */
 	struct list list; /* position in active/blocked lists if blocked>0 */
 	int32_t id; /* stream ID */

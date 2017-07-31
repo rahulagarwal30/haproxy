@@ -414,6 +414,8 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 	h2s->rst       = H2_RST_NONE;
 	h2s->blocked   = H2_BLK_NONE;
 	h2s->by_id.key = h2s->id = id;
+	h2m_init(&h2s->req, si_ic(h2s->appctx->owner));
+	h2m_init(&h2s->res, si_oc(h2s->appctx->owner));
 	LIST_INIT(&h2s->list);
 	h2c->max_id    = id;
 	eb32_insert(&h2c->streams_by_id, &h2s->by_id);
