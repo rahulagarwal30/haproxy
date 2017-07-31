@@ -1338,10 +1338,6 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 	if (!outbuf)
 		goto error;
 
-	ret = h2c_frt_process_active(h2c, only_h2s, outbuf);
-	if (ret < 0)
-		goto error;
-
 	while (1) {
 		if (appctx->st0 == H2_CS_ERROR)
 			goto error;
@@ -1399,10 +1395,6 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 			appctx->st0 = H2_CS_FRAME_P;
 		}
 
-		/* if we're in the context of a stream, stop when facing another one */
-		if (only_h2s && h2c->dsi != only_h2s->id)
-			goto wakeup;
-
 		/* read the incoming frame into in->str. FIXME: for now we don't check the
 		 * frame length but it's limited by the fact that we read into a trash buffer.
 		 */
@@ -1437,10 +1429,18 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 			break;
 
 		case H2_FT_HEADERS:
+			/* don't process other streams when coming from a stream */
+			if (only_h2s && h2c->dsi != only_h2s->id)
+				goto out_empty;
+
 			ret = h2c_frt_handle_headers(h2c, in->str, outbuf);
 			break;
 
 		case H2_FT_DATA:
+			/* don't process other streams when coming from a stream */
+			if (only_h2s && h2c->dsi != only_h2s->id)
+				goto out_empty;
+
 			ret = h2c_frt_handle_data(h2c, in->str, frame_len);
 			break;
 
@@ -1449,6 +1449,10 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 			break;
 
 		default:
+			/* don't process other streams when coming from a stream */
+			if (only_h2s && h2c->dsi != only_h2s->id)
+				goto out_empty;
+
 			ret = 1; // assume success for frames that we ignore. 0=yield, <0=fail.
 		}
 
@@ -1478,6 +1482,11 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 	if (!ret)
 		h2c->flags |= H2_CF_BUFFER_FULL;
 
+	/* also try to process the outgoing side */
+	ret = h2c_frt_process_active(h2c, only_h2s, outbuf);
+	if (ret < 0)
+		goto error;
+
 	/* when called from the H2S side we need to make sure data will
 	 * move on the H2C side.
 	 */
@@ -1502,19 +1511,6 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 	free_trash_chunk(outbuf);
 	free_trash_chunk(in);
 	return -1;
-
- wakeup:
-	/* when called from the H2S side we need to make sure data will
-	 * move on the H2C side.
-	 */
-	if (only_h2s) {
-		si_applet_wake_cb(si);
-		channel_release_buffer(si_ic(si), &appctx->buffer_wait);
-	}
-
-	free_trash_chunk(outbuf);
-	free_trash_chunk(in);
-	return 1;
 }
 
 
