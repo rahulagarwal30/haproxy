@@ -414,8 +414,6 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 	h2s->rst       = H2_RST_NONE;
 	h2s->blocked   = H2_BLK_NONE;
 	h2s->by_id.key = h2s->id = id;
-	h2m_init(&h2s->req, si_ic(h2s->appctx->owner));
-	h2m_init(&h2s->res, si_oc(h2s->appctx->owner));
 	LIST_INIT(&h2s->list);
 	h2c->max_id    = id;
 	eb32_insert(&h2c->streams_by_id, &h2s->by_id);
@@ -454,6 +452,8 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 		actconn++;
 	totalconn++;
 
+	h2m_init(&h2s->req, &s->req);
+	h2m_init(&h2s->res, &s->res);
 	return h2s;
 
 	/* Error unrolling */
@@ -605,7 +605,9 @@ static int h2c_frt_handle_ping(struct h2c *h2c, const char *payload)
  * HEADERS frame (if <out> is not NULL), or to a list of (name,value) pairs
  * representing header fields into the array <hdr> of size <hdr_num>, whose
  * last entry will have an empty name and an empty value. If <hdr_num> is too
- * small to represent the whole message, an error is returned.
+ * small to represent the whole message, an error is returned. If <h2m> is not
+ * NULL, some protocol elements such as content-length and transfer-encoding
+ * will be parsed and stored there as well.
  *
  * For now it's limited to the response. If the header block is incomplete,
  * 0 is returned, waiting to be called again with more data to try it again.
@@ -617,12 +619,13 @@ static int h2c_frt_handle_ping(struct h2c *h2c, const char *payload)
  * attempt. The message is not supposed to be invalid, which is why a few
  * properties such as the character set used in the header field names are not
  * checked. In case of an unparsable response message, a negative value will be
- * returned with err_pos and err_state matching the location and state where
- * the error was met. Leading blank likes are tolerated but not recommended.
+ * returned with h2m->err_pos and h2m->err_state matching the location and
+ * state where the error was met. Leading blank likes are tolerated but not
+ * recommended.
  *
  * This function returns :
- *   < 0 in case of error. In this case, *err_state is filled (if not NULL)
- *       with the state the error occurred in and err_pos (if not NULL) with
+ *   < 0 in case of error. In this case, h2m->err_state is filled (if h2m is
+ *       set) with the state the error occurred in and h2-m>err_pos with the
  *       the position relative to <start>
  *   = 0 in case of missing data.
  *   > 0 on success, it then corresponds to the number of bytes read since
@@ -630,7 +633,7 @@ static int h2c_frt_handle_ping(struct h2c *h2c, const char *payload)
  */
 int h1_headers_to_h2(char *start, const char *stop,
                      struct chunk *out, struct hpack_hdr *hdr, unsigned int hdr_num,
-                     unsigned int *err_pos, enum ht_state *err_state)
+                     struct h2m *h2m)
 {
 	enum ht_state state = HTTP_MSG_RPBEFORE;
 	register char *ptr  = start;
@@ -958,6 +961,20 @@ int h1_headers_to_h2(char *start, const char *stop,
 			hpack_set_hdr(&hdr[hdr_count++], n, v);
 		}
 
+		if (h2m) {
+			long long cl;
+
+			if (isteq(n, ist("transfer-encoding"))) {
+				h2m->flags &= ~H2_MF_CLEN;
+				h2m->flags |= H2_MF_CHNK;
+			}
+			else if (isteq(n, ist("content-length")) && !(h2m->flags & H2_MF_CHNK)) {
+				h2m->flags |= H2_MF_CLEN;
+				strl2llrc(v.ptr, v.len, &cl);
+				h2m->curr_len = h2m->body_len = cl;
+			}
+		}
+
 		sol = ptr - start;
 		if (likely(!HTTP_IS_CRLF(*ptr)))
 			goto http_msg_hdr_name;
@@ -1000,10 +1017,10 @@ int h1_headers_to_h2(char *start, const char *stop,
 
  http_msg_invalid:
 	/* invalid message, error at <ptr> */
-	if (err_state)
-		*err_state = state;
-	if (err_pos)
-		*err_pos = ptr - start + skip;
+	if (h2m) {
+		h2m->err_state = state;
+		h2m->err_pos = ptr - start + skip;
+	}
 	return -1;
 }
 
@@ -1171,19 +1188,17 @@ static int h2c_frt_handle_data(struct h2c *h2c, const char *payload, int plen)
 }
 
 /* Try to send a HEADERS frame matching HTTP/1 response present in the response
- * channel <h1>, for stream id <sid> over connection <h2c>, and using <outbuf>
- * as a temporary output buffer. Returns 0 if not possible yet, <0 on error, >0
- * on success.
+ * channel attached to <h2m>, for stream id <sid> over connection <h2c>, and
+ * using <outbuf> as a temporary output buffer. Returns 0 if not possible yet,
+ * <0 on error, >0 on success.
  */
-static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, struct channel *h1, struct chunk *outbuf)
+static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, struct h2m *h2m, struct chunk *outbuf)
 {
 	struct appctx *appctx = h2c->appctx;
 	struct stream_interface *si = appctx->owner;
 	struct channel *res = si_ic(si);
 	int ret = -1;
 	int skip = 0;
-	unsigned int err_pos = 0;
-	enum ht_state err_state = 0;
 
 	if (h2c_mux_busy(h2c))
 		goto end;
@@ -1201,9 +1216,9 @@ static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, struct channel *h
 	h2_u32_encode(outbuf->str + 5, sid); // 4 bytes
 	outbuf->len = 9;
 
-	skip = h1->buf->o;
-	ret = h1_headers_to_h2(bo_ptr(h1->buf), h1->buf->p,
-	                       outbuf, NULL, 0, &err_pos, &err_state);
+	skip = h2m->chn->buf->o;
+	ret = h1_headers_to_h2(bo_ptr(h2m->chn->buf), bo_ptr(h2m->chn->buf) + h2m->chn->buf->o,
+	                       outbuf, NULL, 0, h2m);
 	if (ret <= 0) { // incomplete or error
 		ret--;
 		goto end;
@@ -1216,10 +1231,10 @@ static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, struct channel *h
 
 	/* consume incoming H1 response */
 	if (ret > 0)
-		bo_skip(h1, skip);
+		bo_skip(h2m->chn, skip);
 
  end:
-	fprintf(stderr, "[%d] sent simple H2 response (sid=%d) = %d bytes (%d in, ep=%u, es=%s)\n", appctx->st0, sid, ret, skip, err_pos, http_msg_state_str(err_state));
+	fprintf(stderr, "[%d] sent simple H2 response (sid=%d) = %d bytes (%d in, ep=%u, es=%s)\n", appctx->st0, sid, ret, skip, h2m->err_pos, http_msg_state_str(h2m->err_state));
 
 	/* success: >= 0 ; wait: -1; failure: < -1 */
 	return ret + 1;
@@ -1259,7 +1274,7 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 		sid = h2s->id;
 		h1s = si_strm(h2s->appctx->owner);
 		fprintf(stderr, "trying to process response from stream %p (id=%d) h1s=%p\n", h2s, sid, h1s);
-		ret = h2c_frt_make_resp_headers(h2c, sid, si_oc(h2s->appctx->owner), outbuf);
+		ret = h2c_frt_make_resp_headers(h2c, sid, &h2s->res, outbuf);
 
 		if (ret < 0) {
 			h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
