@@ -1264,40 +1264,22 @@ static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, struct h2m *h2m, 
 	return ret + 1;
 }
 
-/* processes more incoming frames for connection <h2c>, limiting this to stream
- * <only_h2s> if non-null. It is designed to be called from both sides to make
- * progress on the connection, either when releasing some room on the stream
- * side, or when new data arrive on the connection side. Return values are :
- *   -1 : error already set on the connection
- *    0 : had to stop (buffer full, end of input stream, etc)
- *    1 : need to let the h2c handler verify and take action (eg: other stream).
+/* try to process active streams which are waiting for the connections to be
+ * usable. Returns < 0 on error, 0 if nothing was done, > 0 on success.
  */
-static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
+static int h2c_frt_process_active(struct h2c *h2c, struct h2s *only_h2s, struct chunk *outbuf)
 {
-	struct appctx *appctx = h2c->appctx;
-	struct stream_interface *si = appctx->owner;
-	struct channel *req = si_oc(si);
-	struct chunk *outbuf = NULL;
-	struct chunk *in = NULL;
 	struct h2s *h2s;
-	struct stream *h1s;
-	int frame_len;
-	int ret;
 	int sid;
+	int ret;
 
-	in = alloc_trash_chunk();
-	if (!in)
-		goto error;
-
-	outbuf = alloc_trash_chunk();
-	if (!outbuf)
-		goto error;
+	/* no need to try if the connection's send window is still empty */
+	if (h2c->mws < 0)
+		return 0;
 
 	while (!LIST_ISEMPTY(&h2c->active_list) && (!only_h2s || h2c->active_list.n == &only_h2s->list)) {
 		h2s = LIST_ELEM(h2c->active_list.n, struct h2s *, list);
 		sid = h2s->id;
-		h1s = si_strm(h2s->appctx->owner);
-		fprintf(stderr, "trying to process response from stream %p (id=%d) h1s=%p\n", h2s, sid, h1s);
 
 		do {
 			switch (h2s->res.state) {
@@ -1315,17 +1297,50 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 				break;
 			}
 
+			if (ret == 0) // buffer full, stop sending
+				return 1;
+
 			if (ret < 0) {
 				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
-				goto error;
+				return -1;
 			}
 		} while (ret > 0 && h2s->res.state != H2_MS_TRL2);
 
-		if (ret == 0) // buffer full, stop sending
-			break;
-		LIST_DEL(h2c->active_list.n);
-		LIST_INIT(h2c->active_list.n);
+		LIST_DEL(&h2s->list);
+		LIST_INIT(&h2s->list);
 	}
+	return 1;
+}
+
+/* processes more incoming frames for connection <h2c>, limiting this to stream
+ * <only_h2s> if non-null. It is designed to be called from both sides to make
+ * progress on the connection, either when releasing some room on the stream
+ * side, or when new data arrive on the connection side. Return values are :
+ *   -1 : error already set on the connection
+ *    0 : had to stop (buffer full, end of input stream, etc)
+ *    1 : need to let the h2c handler verify and take action (eg: other stream).
+ */
+static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
+{
+	struct appctx *appctx = h2c->appctx;
+	struct stream_interface *si = appctx->owner;
+	struct channel *req = si_oc(si);
+	struct chunk *outbuf = NULL;
+	struct chunk *in = NULL;
+	int frame_len;
+	int ret;
+
+	in = alloc_trash_chunk();
+	if (!in)
+		goto error;
+
+	outbuf = alloc_trash_chunk();
+	if (!outbuf)
+		goto error;
+
+	ret = h2c_frt_process_active(h2c, only_h2s, outbuf);
+	if (ret < 0)
+		goto error;
 
 	while (1) {
 		if (appctx->st0 == H2_CS_ERROR)
