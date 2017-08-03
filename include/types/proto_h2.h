@@ -58,7 +58,11 @@ enum h2_ss {
 enum h2_ms {
 	H2_MS_HDR0 = 0, // before first HEADERS frame, HEADERS expected
 	H2_MS_HDR1,     // non-final HEADERS frame seen, CONT expected
-	H2_MS_BODY,     // final HEADERS frame seen, DATA expected
+	H2_MS_BODY,     // final HEADERS frame seen, DATA expected (content-length / tunnel)
+	H2_MS_BSIZE,    // H1->H2 body, chunk size expected
+	H2_MS_BCHNK,    // H1->H2 body, chunk expected (creates a DATA frame)
+	H2_MS_BCRLF,    // H1->H2 body, CRLF just after chunk
+	H2_MS_TRL0,     // before non-final HEADERS frame, after DATA (trailers)
 	H2_MS_TRL1,     // non-final HEADERS frame seen after DATA (trailers)
 	H2_MS_TRL2,     // final HEADERS frame seen after DATA (trailers)
 } __attribute__((packed));

@@ -1254,7 +1254,7 @@ static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, struct h2m *h2m, 
 		if (es_now)
 			h2m->state = H2_MS_TRL2;
 		else
-			h2m->state = H2_MS_BODY;
+			h2m->state = (h2m->flags & H2_MF_CLEN) ? H2_MS_BODY : H2_MS_BSIZE;
 	}
 
  end:
@@ -1417,6 +1417,10 @@ static int h2c_frt_process_active(struct h2c *h2c, struct h2s *only_h2s, struct 
 				ret = 0;
 				break;
 			case H2_MS_BODY:
+			case H2_MS_BSIZE:
+			case H2_MS_BCHNK:
+			case H2_MS_BCRLF:
+			case H2_MS_TRL0:
 				ret = h2c_frt_make_resp_data(h2c, h2s, outbuf);
 				break;
 			default:
