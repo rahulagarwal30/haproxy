@@ -1031,6 +1031,157 @@ int h1_headers_to_h2(char *start, const char *stop,
 	return -1;
 }
 
+/* Parse and skip the chunk size in message h2m. The chunk size is expected to
+ * start a the beginning of pending data. Once a complete chunk size is parsed,
+ * it's copied into h2m->curr_len and ->body_len is updated. The number of bytes
+ * used is returned, it's up to the caller to skip them. 0 is returned on
+ * incomplete data, -1 on error.
+ */
+static inline int h1_parse_chunk_size(struct h2m *h2m)
+{
+	struct channel *chn = h2m->chn;
+	const struct buffer *buf = chn->buf;
+	const char *ptr = bo_ptr(buf);
+	const char *ptr_old = ptr;
+	const char *end = buf->data + buf->size;
+	const char *stop = bo_end(buf);
+	unsigned int chunk = 0;
+
+	/* The chunk size is in the following form, though we are only
+	 * interested in the size and CRLF :
+	 *    1*HEXDIGIT *WSP *[ ';' extensions ] CRLF
+	 */
+	while (1) {
+		int c;
+		if (ptr == stop)
+			return 0;
+		c = hex2i(*ptr);
+		if (c < 0) /* not a hex digit anymore */
+			break;
+		if (unlikely(++ptr >= end))
+			ptr = buf->data;
+		if (chunk & 0xF8000000) /* integer overflow will occur if result >= 2GB */
+			goto error;
+		chunk = (chunk << 4) + c;
+	}
+
+	/* empty size not allowed */
+	if (unlikely(ptr == ptr_old))
+		goto error;
+
+	while (HTTP_IS_SPHT(*ptr)) {
+		if (++ptr >= end)
+			ptr = buf->data;
+		if (unlikely(ptr == stop))
+			return 0;
+	}
+
+	/* Up to there, we know that at least one byte is present at *ptr. Check
+	 * for the end of chunk size.
+	 */
+	while (1) {
+		if (likely(HTTP_IS_CRLF(*ptr))) {
+			/* we now have a CR or an LF at ptr */
+			if (likely(*ptr == '\r')) {
+				if (++ptr >= end)
+					ptr = buf->data;
+				if (ptr == stop)
+					return 0;
+			}
+
+			if (*ptr != '\n')
+				goto error;
+			if (++ptr >= end)
+				ptr = buf->data;
+			/* done */
+			break;
+		}
+		else if (*ptr == ';') {
+			/* chunk extension, ends at next CRLF */
+			if (++ptr >= end)
+				ptr = buf->data;
+			if (ptr == stop)
+				return 0;
+
+			while (!HTTP_IS_CRLF(*ptr)) {
+				if (++ptr >= end)
+					ptr = buf->data;
+				if (ptr == stop)
+					return 0;
+			}
+			/* we have a CRLF now, loop above */
+			continue;
+		}
+		else
+			goto error;
+	}
+
+	/* OK we found our CRLF and now <ptr> points to the next byte, which may
+	 * or may not be present. We return the number of bytes parsed.
+	 */
+	h2m->curr_len = chunk;
+	h2m->body_len += chunk;
+	return ptr - ptr_old;
+ error:
+	h2m->err_pos = buffer_count(buf, bo_ptr(buf), ptr);
+	return -1;
+}
+
+/* skips CRLF and chunk size in message h2m to make the buffer point to the
+ * start of the next data chunk. The state is updated and will either be
+ * H2_MS_BCHNK or H2_MS_TRL0. The buffer's "o" counter is decremented
+ * on each state transition so that bo_ptr(buf) points to the beginning of the
+ * part corresponding to the current state. Returns -1 on error, 0 when the
+ * caller must come back later with more data, 1 on success.
+ */
+static inline int h1_get_next_data_chunk(struct h2m *h2m)
+{
+	struct channel *chn = h2m->chn;
+	const struct buffer *buf = chn->buf;
+	const char *ptr;
+	int ret, skip;
+
+	switch (h2m->state) {
+	case H2_MS_BCRLF:
+		/* skip the CRLF after DATA */
+		skip = 1;
+		ptr = bo_ptr(buf);
+		if (*ptr == '\r') {
+			skip++;
+			ptr++;
+			if (ptr >= buf->data + buf->size)
+				ptr = buf->data;
+		}
+
+		if (skip > buf->o)
+			return 0;
+
+		if (*ptr != '\n') {
+			h2m->err_pos = buffer_count(buf, bo_ptr(buf), ptr);
+			return -1;
+		}
+
+		bo_skip(chn, skip);
+		h2m->state = H2_MS_BSIZE;
+		/* fall through for HTTP_MSG_CHUNK_SIZE */
+
+	case H2_MS_BSIZE:
+		/* read the chunk size and assign it to h2m->curr_len,
+		 * then set ->next to point to the body and switch to
+		 * DATA or TRAILERS state.
+		 */
+		ret = h1_parse_chunk_size(h2m);
+		if (ret <= 0)
+			return ret;
+		bo_skip(chn, ret);
+		h2m->state = h2m->curr_len ? H2_MS_BCHNK : H2_MS_TRL0;
+		return 1;
+	default:
+		return -1;
+	}
+	return ret;
+}
+
 
 /* processes a HEADERS frame. The caller must pass the pointer to the payload
  * in <payload> and to a temporary buffer in <outbuf> for the decoded traffic.
@@ -1288,6 +1439,7 @@ static int h2c_frt_make_resp_data(struct h2c *h2c, struct h2s *h2s, struct chunk
 		goto end;
 	}
 
+ new_frame:
 	chunk_reset(outbuf);
 
 	/* len: 0x000000 (fill later), type: 0(DATA), flags: none=0 */
@@ -1305,8 +1457,19 @@ static int h2c_frt_make_resp_data(struct h2c *h2c, struct h2s *h2s, struct chunk
 			size = h2m->curr_len;
 		break;
 	default:          /* te:chunked : parse chunks */
-		ret = -2; // FIXME: chunk not done for now
-		goto end;
+		if (h2m->state != H2_MS_BCHNK) {
+			ret = h1_get_next_data_chunk(h2m);
+			ret -= 1;
+			if (ret < 0) // incomplete or error
+				goto end;
+			if (h2m->state == H2_MS_TRL0) {
+				size = 0;
+				goto send_empty; // reached the end
+			}
+		}
+		/* in MSG_DATA state, continue below */
+		size = h2m->curr_len;
+		break;
 	}
 
 	/* we have in <size> the exact number of bytes we need to copy from
@@ -1346,10 +1509,10 @@ static int h2c_frt_make_resp_data(struct h2c *h2c, struct h2s *h2s, struct chunk
 		ret = -2;
 		goto end;
 	}
-
+ send_empty:
 	/* we may need to add END_STREAM */
 	/* FIXME: bug below, CF_SHUTW must not be considered if size was trimmed to fit the output buffer */
-	if (((h2m->flags & H2_MF_CLEN) && !(h2m->curr_len - size)) || (h2m->chn->flags & CF_SHUTW))
+	if (((h2m->flags & H2_MF_CLEN) && !(h2m->curr_len - size)) || (h2m->chn->flags & CF_SHUTW) || !size)
 		es_now = 1;
 
 	/* update the frame's size */
@@ -1366,6 +1529,11 @@ static int h2c_frt_make_resp_data(struct h2c *h2c, struct h2s *h2s, struct chunk
 		h2m->curr_len -= size;
 		h2s->mws -= size;
 		h2c->mws -= size;
+
+		if (size && !h2m->curr_len && (h2m->flags & H2_MF_CHNK)) {
+			h2m->state = H2_MS_BCRLF;
+			goto new_frame;
+		}
 		/* no trailers for now */
 		if (es_now)
 			h2m->state = H2_MS_TRL2;
