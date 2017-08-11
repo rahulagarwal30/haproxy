@@ -1,0 +1,543 @@
+2017-07-10 -- H2 design notes
+
+H2C is the H2 connection object, H2S is the H2 stream object.
+
+The H2C state machine currently looks like this :
+
+
+            INIT
+             |
+             |
+             V
+          PREFACE
+             |
+             |
+             V
+         SETTINGS1
+             |
+             |
+             V
+      +-> FRAME_H -----.
+      |      |          \
+      |      |           >- ERROR --> ERROR2
+      |      V          /
+      |   FRAME_P -----'
+      |      |
+      +------+
+
+
+In order to send proper window updates, the H2C maintains a counter of bytes
+received for the connection and for the current stream.
+
+Window updates must be sent any time it is possible to do it in order to
+prevent a client from stalling. If a window update cannot be sent, reading new
+frames is temporarily disabled so that the current stream doesn't change.
+
+Since we only keep a single per-stream count in the connection, window updates
+are forced immediately before switching to another stream. Window updates can
+thus be sent in the following situations :
+
+  - when receiving a frame header indicating a different stream ID than the
+    current one, forcing to send the WU for the current stream before switching
+    to the new one (in this case the frame header is not consumed until the WU
+    messages are properly sent, so the same operation may be retried)
+
+  - when leaving the I/O handler if any updates remained unsent, which may
+    happen before a frame header or before a frame payload. In this latter
+    case, any pending WU necessarily are for the current stream.
+
+
+Note regarding the stream ID : we check that each received stream ID is greater
+than the currently known max stream ID, but this will not work if we implement
+PUSH, the max_id must be per direction so that we don't error when the client
+sends a stream ID lower than the recently emitted PUSHed stream ID.
+
+For H2 streams, we have a request and a response message on both of them. On
+both sides, the message follows the sequence below which supports empty bodies,
+trailers and continuation frames both in headers and trailers :
+
+                     HDR0
+                      |\ HEADERS,!EH
+                      | \
+           HEADERS,EH |  HDR1 <--. CONT,!EH
+                      | /    \___/
+                      |/ CONT,EH
+                      V
+                .--> BODY
+           DATA \___/ |\ HEADERS,!EH
+                      | \
+           HEADERS,EH |  TRL1 <--. CONT,!EH
+                      | /    \___/
+                      |/ CONT,EH
+                      V
+                     TRL2
+
+A couple of ES_SENT and ES_RCVD flags contain a sample of the END_STREAM flag
+carried on the HEADERS and DATA frames and are stored into the H2S flags. The
+reason is that the END_STREAM flag is not set on CONTINUATION, but we must
+continue to accept CONTINUATION frames after the HEADERS frame carrying this
+flag until we reach the END_HEADERS bit indicating the last frame.
+
+A stream willing to send becomes "active" and appears in the "active" list,
+unless :
+  - it's blocked by the connection's flow control, in which case it moves to
+    the "blocked" list. The connection will then be able to move it to the
+    active list again once its window grows again ;
+  - it's blocked by its own flow control, in which case it's not considered
+    as active ; the processing will restart when delivering the window update
+    to its h2s instance.
+  - it doesn't want to send.
+
+Note: a stream interested in sending or receiving should still try to process
+incoming WU frames, even for other streams. Indeed, most of the incoming frames
+during a download will be WU frames. If there are multiple streams in parallel,
+being able to :
+  - read the stream's WU will open its window
+  - read the connection's WU will open its window
+  - read other streams' WU will give a greater chance to be able to find the
+    current stream's WU next, as well as the some of the current stream's
+    incoming data frames if any.
+
+The optimal frame processing sequence should thus be :
+
+  1) check if a pending incoming frame is a WU, if so, process it
+  2) if there's no pending incoming frame, read it and goto 1
+  3) if pending frame is not a WU, stop processing incoming frames
+  4) process active list
+  5) process incoming frames
+  6) if a WU was found and streams are blocked, process blocked list
+
+So a stream can be in one of such states :
+
+                    IDLE             STRM FCTL must be stronger than CONN FCTL
+                __/   |   \__        so that it's possible for a connection to
+               /      |      \       move all waiters to the active list at
+              V       V       V      once without trying to be smart.
+          STRM --> ACTIVE --> CONN
+          FCTL <--        <-- FCTL   Logically there will be no exchange between
+            |^                 |^    the two FCTL entries, by lack of info on
+            |`.................'|    sides.
+            `...................'
+
+Dealing with end of response :
+  - with content-length :
+    - ES on DATA frame (including empty one) as soon as CL is reached
+      in BODY state
+    - RST_STREAM if SHUTW before the end
+  - with chunked :
+    - ES on empty DATA frame on TRL0->TRL2 transition (no trailers)
+    - ES on HEADERS frame on TRL1->TRL2 transition (trailers)
+    - RST_STREAM if SHUTW before the end
+  - with neither (close)
+    - ES on DATA frame once buf->o is sent and SHUTW is done, including
+      empty data frame
+
+
+2017-08-07 -- Concerns regarding the H2 mux/demux
+-------------------------------------------------
+
+The H2 mux/demux is bidirectional and both directions are independant on each
+other, so most often data for a stream will be received while data for another
+stream are being sent.
+
+The mux and the demux are not symmetrical : the demux receives a continuous
+stream of frames carrying a stream ID. The target stream is dictated by the
+stream ID of these messages. If the associated stream is blocked and cannot
+make progress, the entire connection is stalled. On the response side, streams
+compete to access the connection. The mux has to choose between the active ones
+when it's idle and should be fair. Thus the active list is required only for
+responses.
+
+Responses may lock the channel for the time it requires to send a full frame or
+even a bit more in case a HEADERS frame is sent without the EH bit, indicating
+that a CONTINUATION frame must immediately follow.
+
+Request processing may occasionally lead to an immediate response (mostly for
+ACK or for error). It is not really advisable to delay request processing until
+the response channel is free. Instead, the operation on the request is not
+completed until the response could be produced. This means that all operations
+are left in a retryable state.
+
+In order not to loop forever on such an attempt, an operation which fails due
+to lack of buffer space in the response channel leaves via si_applet_cant_put()
+which sets SI_FL_WANT_PUT and SI_FL_WAIT_ROOM on the stream interface. Any
+subsequent call observing SI_FL_WAIT_ROOM knows that no progress was made on
+the buffer and will not even try to produce data.
+
+In order to guarantee forward progress, response processing must always have
+priority over request processing. This way, when there is an access conflict,
+it is certain that by evacuating responses, operation will eventually complete
+after the end of these responses is reached.
+
+Conversely in order to maintain fairness, a failed attempt to process a request
+due to lack of response buffer space must leave the channel marked "in use". It
+will avoid the risk of being stolen and fresh request data aging in the caches.
+
+Overall, in the H2C->H2S demux, a stream cannot read when :
+  - the H2C request buffer is empty
+
+  - the H2C request buffer is closed
+
+  - the H2C request channel is currently in use by another stream, as detected
+    by h2c->dsi != -1
+
+  - the H2C request channel is currently locked (HEADERS->CONTINUATION)
+
+  - the H2S request channel is closed
+
+  - the H2S request channel is full (SI_FL_WAIT_ROOM is set)
+
+  - the H2S request channel is waiting for a buffer to be allocated.
+
+  - a previous attempt to read and process the request failed due to a lack of
+    space in the H2C response channel (SI_FL_WAIT_ROOM is set). Technically
+    speaking it's not a guarantee that it's related to this stream but the hint
+    is enough to avoid trying
+
+The H2C->H2S demux should still try to process input and defer responses when :
+  - the H2S is being blocked by flow control, in order to give a chance to read
+    a WINDOW_UPDATE request
+
+  - the H2C is being blocked by flow control, in order to give a chance to read
+    a WINDOW_UPDATE request
+
+The H2S->H2C mux must stop sending data when :
+  - the H2S response buffer is empty
+
+  - the H2S response channel is closed
+
+  - the H2C response buffer is full
+
+  - a previous attempt to write to the H2C's response buffer failed by lack of
+    room (SI_FL_WAIT_ROOM is set). Technically speaking it's not a guarantee
+    that it's related to this stream but the hint is enough to avoid trying
+
+  - the stream is currently subject to flow control and the response requires
+    some budget (non-empty DATA frames)
+
+  - the connection is currently subject to flow control and the response
+    requires some budget (non-empty DATA frames).
+
+A stream needs to send (but cannot always) when :
+  - some data are present in the H2S response buffer
+
+  - a shutdown notification just happened from the H2S response channel
+
+  - a serious error happened on the H2S side (abort with close for example,
+    leading to h2s->appctx == NULL with h2s->st != H2_SS_CLOSED)
+
+It is necessary to consume the request messages as fast as possible to maximize
+hopes to find the WINDOW_UPDATE messages required to make progress on the
+response channel. On the other hand :
+  - dealing with too many concurrent requests may lead to empty requests
+    preventing large data transfers from making progress since they are not
+    subject to flow control and could be used to fill the response pipe with
+    headers (eg: HEAD flood)
+
+  - dealing with DATA first will increase fairness and will ensure that
+    connections eventually reach an end but can cause huge latencies for small
+    requests due to the response buffer being constantly clogged by heavy data.
+
+It may be the client's problem to properly adjust window sizes for the
+connection and its streams. Or we may decide that no stream is allowed to use
+more than its share of the connection compared to all pending streams (might
+be difficult to sustain with HEADERS frames).
+
+It's important to note that due to the lack of extra buffers to store the
+demultiplexed request traffic, it's not really possible to only demux traffic
+and defer processing, because the demuxed traffic must be decompressed on the
+fly and transcoded on the fly into the H1 buffer before a frame may be skipped.
+
+We need to distinguish two types of activities on the streams and connection :
+  - data-oriented activity (causing some traffic to be produced)
+  - activity meant to unblock something
+
+WINDOW_UPDATES received on the H2C connection, notifications of ability to
+write to a channel may unblock certain streams. It could be useful to maintain
+a group of "BLOCKED" flags on each stream to indicate what the stream is waiting
+for. Then on such specific activities, these flags could be released and streams
+with no more BLOCKED flags could be queued into the active list. Some of such
+flags could include :
+
+   H2S_F_DBLK_ALLOC: demux blocked waiting for H2S request buffer allocation
+   H2S_F_DBLK_SROOM: demux blocked waiting for room in the H2S request buffer
+   H2S_F_DBLK_CROOM: demux blocked waiting for room in the H2C response buffer
+
+   H2S_F_MBLK_INPUT: mux blocked waiting for data in the H2S response buffer
+   H2S_F_MBLK_ALLOC: mux blocked waiting for H2C response buffer allocation
+   H2S_F_MBLK_CROOM: mux blocked waiting for room in the H2C response buffer
+   H2S_F_MBLK_CFCTL: mux blocked waiting for connection's fctl window opening
+   H2S_F_MBLK_SFCTL: mux blocked waiting for stream's fctl window opening
+
+The first ones (DBLK_*) only affect request processing. The last ones (MBLK_*)
+impact the presence in the active list. Among them a few depend solely on the
+connection, which means that when the connection's conditions change, several
+streams will have to be woken up (ALLOC, CROOM, CFCTL). It's interesting to
+note that these are the only flags requiring the presence of the stream in a
+blocked list. The other ones will be checked on the stream itself after a
+lookup from the stream ID or after a direct access from the H1 side.
+
+Normally, except on very low level errors, there should not be anymore a
+situation where an H1 response is tentatively sent, immediately followed by a
+synchronous close. All responses are sent into buffers and the connection may
+only be closed once the response is consumed, so the risk of a data loss seems
+inexistent here.
+
+Our H2->H1 model looks like this. The H2 connection (H2C) has its own set of
+buffers on the left, is followed by an applet connected via an H2 stream (H2S)
+to another applet itself connected to the H1 stream. Since the H2C connects to
+many H2S at the same time, the full H2S state is stored on the H2S applet which
+is also used to transcode H2 to and from H1. All the H2S applets are linked to
+from the H2C applet.
+
+  ------------.                          -------------.
+       | | | | >--.     ,      '     .-->     | | | |  >
+  ------------'    \   /| H2S  |\   /    -------------'
+      H2C           >|< |v^v^v^| >|<        H1
+  .-------------   /   \|      |/   \    .-------------
+ <  | | |      <--'     '      '     '--<  | | |
+  '-------------                         '-------------
+
+The outcome of all this is : on a MUX/DEMUX, there are multiple blocking causes
+and a few activity causes. Data enter via two different points and leave via
+two other points, for any of the two entry points because some messages require
+an immediate response on the same side the message was received. And in order
+to transfer a message or a response, a buffer needs to be allocated, available
+and not full.
+
+On the diagram above, we see that activity is detected as soon as :
+  - there are data available in the H2C request buffer facing the H2C applet
+  - there are data available in the H1 response buffer facing the H2S applet
+
+On the diagram above, there is congestion as soon as :
+  - the H1 request buffer failed to be allocated
+  - the H1 request buffer cannot be written to because it's full
+  - the H2 response buffer is busy processing another stream
+  - the H2 response buffer failed to be allocated
+  - the H2 response buffer cannot be written to because it's full
+  - the H2 response could not be written because the H2S is flow controlled
+  - the H2 response could not be written because the H2C is flow controlled
+
+All these situations can be summarized with condition flags and per family :
+  - those that will cause the stream to be immediately notified once they
+    change, which we'll regroup under the mask SBLOCKED : H1*, H2S fctled.
+  - those that may affect multiple streams and which the connection must
+    broadcast once the situation change in order to try to re-enable streams,
+    and which we'll group nuder the mask CBLOCKED : H2 response buffer busy/
+    unallocated/full, H2C fctled.
+
+The condition for an H2S to be active is :
+
+  (CDATA | SDATA) & !(CBLOCKED | SBLOCKED)
+
+Where CDATA and SDATA indicate the presence of data designating the stream in
+the respective buffers.
+
+It's worth noting that the (CBLOCKED|SBLOCKED) state very closely matches the
+"D" state that UNIX processes face while waiting for an I/O operation to
+complete.
+
+Here it becomes obvious that the connection only needs :
+  - an active list, for the H2S satisfying the condition above
+  - a blocked list, for the H2S blocked in CBLOCKED so that they may be
+    broadcasted the updates
+
+When an active stream attempts an operation in a situation resulting in a
+blocking, it must set its corresponding blocked condition flag and move to the
+blocked list. A stream must not move to the blocked list unless active.
+
+When the connection receives new information allowing to unblock streams, it
+must remove the associated BLOCKED bits from the streams in the blocked list
+and automatically move these streams to the active list.
+
+It *seems* that there is a distinction between congestion and application's
+unwillingness to move :
+  - congestion is due to a buffer somewhere which is full, and its consequences
+    propagating down the drain. For example, an H1 buffer might be full,
+    preventing an H2S from finishing to read data from the H2 request buffer
+    and sending a CONTINUATION frame on the H2C response buffer, leaving this
+    buffer in the BUSY state and preventing other streams from sending. This
+    is the effect of a congestion.
+
+  - application's unwillingness to move is caused by self-regulation to follow
+    policies like flow control : the application cannot make progress without
+    receiving new messages allowing it to send again. This situation should not
+    cause congestion, though it may possibly detected simultaneously. In this
+    case it is critical that incoming messages are not blocked. It seems that
+    this situation is unidirectional.
+
+So incoming data should not be delivered to the applet only when congestion is
+detected, ie the applet will very likely need to forward data or to respond but
+this response will likely be blocked. A specific bitmask needs to be created to
+match only congestion. Probably this one can be made standard.
+
+
+2017-08-11 -- Challenges imposed by H2->H1 gatewaying in a single step
+----------------------------------------------------------------------
+
+One of the main challenges is that we're translating H2->H1 and H1->H2 and that
+such operations are hardly cancellable due to HPACK state etc. In fact we've
+shorted the total list of operations. Ideally the model should involve 3
+consecutive layers, with each having a buffer for the protocol it carries :
+
+           MUXED    SINGLE    SINGLE
+            H2        H2        H1
+           ====      ====      ====
+    fd --O<    >O--O<    >O--O<    >O-- fd
+           ====      ====      ====
+
+The MUXED H2 layer contains the H2 protocol as it appears on the wire after
+decryption. Here the headers are HPACK-encoded. The SINGLE H2 layer contains an
+extraction of a single stream from the H2 traffic. The headers are decoded from
+HPACK but still H2 headers (eg: ":status"). They're a set of (name,value) where
+each of "name" and "value" is a (ptr,len) association. And the SINGLE H1 layer
+contains real HTTP/1 traffic.
+
+Operations involved at each stage are :
+  - MH2 --> SH2 :
+    - stream extraction (demux)
+    - frame defragmentation (HEADERS and CONTINUATION)
+    - HPACK decoding
+    - data copying
+  - SH2 --> SH1 :
+    - H2 to H1 header decoding (rebuild an H1 request)
+    - H2 to H1 data copying (pure copy or chunked encoding)
+  - SH2 <-- SH1
+    - H1 to H2 header encoding (H1 parsing mostly)
+    - H1 to H2 data copying (H1 chunked encoding parsing)
+  - MH2 <-- SH2 :
+    - stream insertion (mux)
+    - flow control
+    - HPACK encoding
+    - data copying
+
+It is worth noting that such a model doesn't require H1 conversion anymore as
+soon as the HTTP processing may apply to H2 contents. The H2 contents have to
+be easy to process and manipulate, and for this they must follow closely what
+is already used for the dynamic headers table and the HPACK encoding rules.
+Particularly, all headers must be present in raw form, prefixed by a length,
+and with pseudo-headers placed first. The following encoding would very likely
+work for each individual header :
+
+       [ NLEN16 | VLEN16 | NAME | VALUE | PAD ]
+
+- NLEN16 is the 16-bit representation of the length of the header field's name
+- VLEN16 is the 16-bit representation of the length of the header field's value
+- NAME is NLEN16 bytes representing the name
+- VALUE is VLEN16 bytes representing the value
+- PAD is 0 or 1 byte of extra padding ensuring that the next block remains
+  16-bit aligned for easier processing.
+- the overheader pre header is thus 4 to 5 bytes, which is well below the 32
+  planned by the protocol when advertising the MAX_HEADER_LIST_SIZE setting.
+- the end of headers can be marked by NLEN16=VLEN16=0
+- the removal of a header can be marked by NLEN16=0, VLEN16=NLEN+VLEN rounded
+  up to the next multiple of 2 so that the contents are simply skipped. Note
+  that this limits the total length to 64kB-1 for both name and value.
+- DATA can then follow after headers using [ LEN | DATA ] or maybe just [DATA]
+  with some side-channel information of the amount of data available. After the
+  end of DATA, we could find again this header encoding for trailers.
+
+This arrangement ensures that it is possible to implement H2<->H2 gateways and
+process all HTTP traffic at the H2 layer.
+
+
+2017-08-11 -- Naming
+--------------------
+
+Here we assign the following names to each data stage :
+
+  - "H2C" is both the HTTP/2 connection and the contents of the buffers of an
+    HTTP/2 connection ; so H2C contains multiplexed compressed streams ;
+
+  - "H2S" is both the HTTP/2 stream and the contents of the buffers of an
+    HTTP/2 extracted and decompressed stream ; such a stream only uses an
+    internal representation like the one above which is efficient to store,
+    convert and process ;
+
+  - "H1" is both the H1 stream or connection and the contents of the buffers of
+    an H1 connection. The representation here consists in valid H1 messages ;
+
+And we assign the following names to each transformation stage, based on the
+same rule : <protocol_base><origin><sink> :
+
+  - H2CS : receives requests from H2C, demultiplexes and decompresses them to
+    feed H2S. Receives responses from H2S, compresses them and multiplexes them
+    to H2C.
+
+  - H2H1 : receives requests from H2S, converts them to H1. Receives responses
+    from H1, converts them to H2S.
+
+  - H1H2 : receives requests from H1, converts them to H2S. Receives responses
+    from H2S, converts them to H.
+
+  - H2SC : receives requests from H2S, compresses them and multiplexes them to
+    H2C. Receives responses from H2S, demultiplexes and decompresses them to
+    H2S.
+
+Temporarily for the initial implementation we'll need :
+  - H2CH1 : H2C to H1 gateway, running on both applets, and in charge of stream
+    extraction, decompression and transcoding at once.
+
+The transformation layer needs to rely on two applets, one per side. In some
+cases, it's likely that an hybrid entity made of two integrated applets will
+work, for all 1:1 transformations. But on multiplexers (eg: H2C->H2S) it is not
+the case since there will be a single applet on the multiplexed side versus
+one per stream on the demultiplexed side. In most cases it seems like naming
+applets with just a suffix to distinguish them should work, eg: H2CS_S for the
+stream side of the H2CS and H2CS_C for the connection side. It's expected that
+there will not be too many uses of such applets.
+
+In every case, there's a single place where the native protocol is handled,
+which is where analysers are. Most of the time they don't involve any form of
+transformation. Transformation happens between layers, inside the applets.
+
+
+Examples :
+----------
+
+  - H2C -> H1 gateway, single step (H1 native processing) :
+
+            H2C        H1
+           ==== H2CH1 ====
+    fd --O<    >O---O< ** >O-- fd
+           ====       ====
+
+
+  - H2C -> H2S -> H1 gateway (H1 native processing) :
+
+            H2C       H2S       H1
+           ==== H2CS ==== H2H1 ====
+    fd --O<    >O--O<    >O--O< ** >O-- fd
+           ====      ====      ====
+
+
+  - H2C -> H2S -> H1 -> H2S -> H2C (H1 native processing) :
+
+            H2C       H2S       H1        H2S       H2C
+           ==== H2CS ==== H2H1 ==== H1H1 ==== H2SC ====
+    fd --O<    >O--O<    >O--O< ** >O--O<    >O--O<    >O-- fd
+           ====      ====      ====      ====      ====
+
+
+  - H2C -> H2S -> H2C gateway (H2 native processing) :
+
+            H2C       H2S       H2C
+           ==== H2CS ==== H2SC ====
+    fd --O<    >O--O< ** >O--O<    >O-- fd
+           ====      ====      ====
+
+
+  - H1 -> H2S -> H1 gateway (H2 native processing) :
+
+            H1        H2S       H1
+           ==== H1H2 ==== H2H1 ====
+    fd --O<    >O--O< ** >O--O<    >O-- fd
+           ====      ====      ====
+
+The principle may be extended, as for example QUIC to H2S to H1 for native H1
+processing :
+
+           QUIC       H2S       H1
+           ==== QCH2 ==== H2H1 ====
+    fd --O<    >O--O<    >O--O< ** >O-- fd
+           ====      ====      ====
