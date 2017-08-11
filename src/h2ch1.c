@@ -1,7 +1,8 @@
 /*
- * HTTP/2 protocol converter
+ * HTTP/2 to HTTP/1 protocol converter
  *
- * Copyright 2000-2016 Willy Tarreau <w@1wt.eu>
+ * Copyright 2000-2017 Willy Tarreau <w@1wt.eu>
+ * Copyright 2017 HAProxy Technologies
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -43,7 +44,8 @@
 #include <proto/hpack-hdr.h>
 #include <proto/log.h>
 #include <proto/proto_tcp.h>
-#include <proto/proto_h2.h>
+#include <proto/h2ch1.h>
+#include <proto/h2common.h>
 #include <proto/proto_http.h>
 #include <proto/proxy.h>
 #include <proto/stream.h>
@@ -58,34 +60,6 @@ static void h2s_frt_release_handler(struct appctx *appctx);
 
 struct pool_head *pool2_h2c;
 struct pool_head *pool2_h2s;
-
-static const char h2_conn_preface[24] = // PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n
-	"\x50\x52\x49\x20\x2a\x20\x48\x54"
-	"\x54\x50\x2f\x32\x2e\x30\x0d\x0a"
-	"\x0d\x0a\x53\x4d\x0d\x0a\x0d\x0a";
-
-const char *h2_ft_strings[H2_FT_ENTRIES] = {
-	[H2_FT_DATA]          = "DATA",
-	[H2_FT_HEADERS]       = "HEADERS",
-	[H2_FT_PRIORITY]      = "PRIORITY",
-	[H2_FT_RST_STREAM]    = "RST_STREAM",
-	[H2_FT_SETTINGS]      = "SETTINGS",
-	[H2_FT_PUSH_PROMISE]  = "PUSH_PROMISE",
-	[H2_FT_PING]          = "PING",
-	[H2_FT_GOAWAY]        = "GOAWAY",
-	[H2_FT_WINDOW_UPDATE] =	"WINDOW_UPDATE",
-};
-
-const char *h2_ss_strings[H2_SS_ENTRIES] = {
-	[H2_SS_IDLE]   = "idle",
-	[H2_SS_INIT]   = "init", /* not part of the spec */
-	[H2_SS_RLOC]   = "reserved(local)",
-	[H2_SS_RREM]   = "reserved(remote)",
-	[H2_SS_OPEN]   = "open",
-	[H2_SS_HREM]   = "half-closed(remote)",
-	[H2_SS_HLOC]   = "half-closed(local)",
-	[H2_SS_CLOSED] = "closed",
-};
 
 struct applet h2c_frt_applet = {
 	.obj_type = OBJ_TYPE_APPLET,
@@ -141,10 +115,39 @@ const struct h2s *h2_idle_stream = &(const struct h2s){
 	.id        = 0,
 };
 
-/* a few global settings */
-static int h2_settings_header_table_size      =  4096; /* initial value */
-static int h2_settings_initial_window_size    = 65535; /* initial value */
-static int h2_settings_max_concurrent_streams =   100;
+const char *h2_ss_strings[H2_SS_ENTRIES] = {
+	[H2_SS_IDLE]          = "idle",
+	[H2_SS_INIT]          = "init", /* not part of the spec */
+	[H2_SS_RLOC]          = "reserved(local)",
+	[H2_SS_RREM]          = "reserved(remote)",
+	[H2_SS_OPEN]          = "open",
+	[H2_SS_HREM]          = "half-closed(remote)",
+	[H2_SS_HLOC]          = "half-closed(local)",
+	[H2_SS_CLOSED]        = "closed",
+};
+
+const char *h2_cs_strings[H2_CS_ENTRIES] = {
+	[H2_CS_INIT]          = "init",
+	[H2_CS_PREFACE]       = "preface",
+	[H2_CS_SETTINGS1]     = "settings1",
+	[H2_CS_FRAME_H]       = "frame-h",
+	[H2_CS_FRAME_P]       = "frame-p",
+	[H2_CS_ERROR]         = "error",
+	[H2_CS_ERROR2]        = "error2",
+};
+
+const char *h2_ms_strings[H2_MS_ENTRIES] = {
+	[H2_MS_HDR0]          = "hdr0",
+	[H2_MS_HDR1]          = "hdr1",
+	[H2_MS_BODY]          = "body",
+	[H2_MS_BSIZE]         = "bsize",
+	[H2_MS_BCHNK]         = "bchnk",
+	[H2_MS_BCRLF]         = "bcrlf",
+	[H2_MS_TRL0]          = "trl0",
+	[H2_MS_TRL1]          = "trl1",
+	[H2_MS_TRL2]          = "trl2",
+};
+
 
 /* try to send a settings frame on the connection. Returns 0 if not possible
  * yet, <0 on error, >0 on success. See RFC7540#11.3 for the various codes.
@@ -2050,66 +2053,9 @@ static void h2s_frt_release_handler(struct appctx *appctx)
 		LIST_DEL(&h2s->list);
 }
 
-/* config parser for global "tune.h2.header-table-size" */
-static int h2_parse_header_table_size(char **args, int section_type, struct proxy *curpx,
-                                      struct proxy *defpx, const char *file, int line,
-                                      char **err)
-{
-	if (too_many_args(1, args, err, NULL))
-		return -1;
-
-	h2_settings_header_table_size = atoi(args[1]);
-	if (h2_settings_header_table_size < 4096 || h2_settings_header_table_size > 65536) {
-		memprintf(err, "'%s' expects a numeric value between 4096 and 65536.", args[0]);
-		return -1;
-	}
-	return 0;
-}
-
-/* config parser for global "tune.h2.initial-window-size" */
-static int h2_parse_initial_window_size(char **args, int section_type, struct proxy *curpx,
-                                        struct proxy *defpx, const char *file, int line,
-                                        char **err)
-{
-	if (too_many_args(1, args, err, NULL))
-		return -1;
-
-	h2_settings_initial_window_size = atoi(args[1]);
-	if (h2_settings_initial_window_size < 0) {
-		memprintf(err, "'%s' expects a positive numeric value.", args[0]);
-		return -1;
-	}
-	return 0;
-}
-
-/* config parser for global "tune.h2.max-concurrent-streams" */
-static int h2_parse_max_concurrent_streams(char **args, int section_type, struct proxy *curpx,
-                                           struct proxy *defpx, const char *file, int line,
-                                           char **err)
-{
-	if (too_many_args(1, args, err, NULL))
-		return -1;
-
-	h2_settings_max_concurrent_streams = atoi(args[1]);
-	if (h2_settings_max_concurrent_streams < 0) {
-		memprintf(err, "'%s' expects a positive numeric value.", args[0]);
-		return -1;
-	}
-	return 0;
-}
-
-/* config keyword parsers */
-static struct cfg_kw_list cfg_kws = {ILH, {
-	{ CFG_GLOBAL, "tune.h2.header-table-size",      h2_parse_header_table_size      },
-	{ CFG_GLOBAL, "tune.h2.initial-window-size",    h2_parse_initial_window_size    },
-	{ CFG_GLOBAL, "tune.h2.max-concurrent-streams", h2_parse_max_concurrent_streams },
-	{ 0, NULL, NULL }
-}};
-
 __attribute__((constructor))
 static void __h2_init(void)
 {
 	pool2_h2c = create_pool("h2c", sizeof(struct h2c), MEM_F_SHARED);
 	pool2_h2s = create_pool("h2s", sizeof(struct h2s), MEM_F_SHARED);
-	cfg_register_keywords(&cfg_kws);
 }

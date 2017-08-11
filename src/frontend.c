@@ -38,7 +38,7 @@
 #include <proto/frontend.h>
 #include <proto/hdr_idx.h>
 #include <proto/log.h>
-#include <proto/proto_h2.h>
+#include <proto/h2ch1.h>
 #include <proto/proto_http.h>
 #include <proto/proto_tcp.h>
 #include <proto/proxy.h>
