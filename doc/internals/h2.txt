@@ -541,3 +541,37 @@ processing :
            ==== QCH2 ==== H2H1 ====
     fd --O<    >O--O<    >O--O< ** >O-- fd
            ====      ====      ====
+
+
+-------------------------------
+
+check list (updated 2017-08-04)
+  * request : honnor INITIAL_WINDOW_SIZE in settings
+  * request : honnor WINDOW_UPDATE frames
+  * implement parsing of H1 responses in H2S :
+      * make HTTP mandatory ?
+      * enforce hdr_idx and parsing if HTTP state is invalid ?
+        => no, parse instead
+      * even if valid, some operations like rsprep might add some headers
+        => unconditionally parse ?
+        => yes
+  * implement fctl on responses
+  * basic encoding (literal) of responses in the state machine
+  * static encoding of responses
+    => some of them
+  - reimplement the FCTL and blocking flags correctly following the new model
+    above, while still keeping h2ch1 instead of h2c->h2s->h1
+  - fix stream-int states leading to si_applet_wake_cb() being performed on
+    SI_ST_CLO when the client aborts (segfault)
+  - request : CONTINUATION frames
+  - forward DATA frames from h2c to stream. Note: quid content-length ?
+  - handle 100-continue and 1xx in general.
+  - huffman encoding of responses
+  - dynamic encoding of responses
+  - revisit all error handling (h2c_error does nothing but keep a copy of the
+    error code for now, it must try to send an error message)
+  - emit RST_STREAM(REFUSED_STREAM) on connection errors
+  - detach private idle conns from streams and put them on h2c (tree indexed on
+    server pointer + linked list of all of them)
+  - detach public idle conns from streams and put them on the server itself
+  - revist all FIXME tags
