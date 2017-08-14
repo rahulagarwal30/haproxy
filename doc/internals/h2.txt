@@ -543,6 +543,143 @@ processing :
            ====      ====      ====
 
 
+
+2017-08-14 -- Fix proposal for stream blocking
+----------------------------------------------
+
+  1) implement the following flags on all streams :
+     S2C direction (mux) :
+     S2C_SFCTL  - stream subject to FCTL
+     S2C_CBUSY  - connection busy (in use by another stream)
+     S2C_CFCTL  - connection subject to FCTL
+     S2C_CALLOC - failed to allocate connection buffer
+     S2C_CFULL  - connection buffer full
+
+     C2S direction (demux) :
+     C2S_SALLOC - failed to allocate stream buffer
+     C2S_SFULL  - stream buffer sull
+     C2S_SFCTL  - stream subject to FCTL
+     C2S_CBUSY  - connection busy (in use by another stream)
+     C2S_CFCTL  - connection subject to FCTL
+     C2S_CALLOC - failed to allocate connection buffer
+     C2S_CFULL  - connection buffer full
+
+  2) implement a pseudo-stream for stream 0, that uses the same flags as above
+     to indicate when it's blocked (CBUSY, CALLOC, CFULL). This will be used to
+     emit connection-level messages, of frame types SETTINGS, PING, GOAWAY and
+     WINDOW_UPDATE
+
+  3) implement 4 stream lists in the connection :
+     - sleep_list : contains sleeping streams (ie those not blocked by the
+       connection)
+     - wait_list  : contains active streams wanting to send but waiting for the
+       current stream to release the connection
+     - fctl_list  : contains active streams about to send but blocked by the
+       connection's flow control
+     - cong_list  : contains active streams about to send and not subject to
+       flow control but blocked by congestion on the connection (buffer full or
+       not allocated)
+
+     Active streams are processed this way (the stream is always the requester
+     so no need to scan anything here) :
+
+        a) are the stream AND the frame subject to stream-level flow control ?
+           if so, set S2C_SFCTL, move the stream to the sleep list and wait
+
+        b) is the connection already in use by another stream ?
+           if so, set S2C_CBUSY, move the stream to the wait_list and wait
+
+        c) are the connection AND the frame subject to connection flow control?
+           if so, set S2C_CFCTL, move the stream to the fctl_list and wait
+
+        d) did the connection buffer fail to be allocated ?
+           if so, set S2C_CALLOC, move the stream to the cong_list and wait
+
+        e) did a write to the connection buffer fail due to a buffer full ?
+           if so, set S2C_CFULL, move the stream to the cong_list and wait
+
+        f) otherwise send the message, and if done move back to the sleep_list.
+
+     It's important that senders blocking before cong_list try not to keep the
+     connection busy so that other waiters may try to send.
+
+  4) implement a stream receive handler :
+
+        a) lookup the stream corresponding to the current demux stream ID
+
+        b) if this stream has any of the C2S_* flag set, return and wait
+
+        c) try to process the frame
+
+        d) if the frame requires allocation of a stream buffer and it fails,
+           set C2S_SALLOC and wait
+
+        e) if the frame requires writing to a stream buffer which is full, set
+           C2S_SFULL and wait
+
+        f) if the frame requires sending back a flow-controlled frame and the
+           stream is under flow control, set C2S_SFCTL and wait
+
+        g) if the frame requires sending back a response message and the mux
+           is busy, set C2S_CBUSY and wait
+
+        h) if the frame requires sending back a response message and the
+           connection is flow controlled, set C2S_CFCTL and wait
+
+        i) if the frame requires sending back a response message and the
+           response buffer cannot be allocated, set C2S_CALLOC and wait
+
+        j) if the frame requires sending back a response message and the
+           response buffer is full, set C2S_CFULL and wait
+
+  5) implement a stream processor :
+
+        a) if there are data to send and no S2C flag is set, send (and possibly
+           move to the appropriate list)
+
+        b) if sending fails, see #3 above
+
+        c) if there are any C2S flag, check if the stream is the connection's
+           demux stream (it must be otherwise it's a bug)
+
+        d) if there's no C2S flag and the stream is the connection's demux
+           stream, process it according to #4 and if completed, wake the
+           connection handler up
+
+  6) implement a connection handler :
+
+        a) compute the new flags to eliminate from the blocked streams based on
+           the buffer condition (fctl, calloc, cfull)
+
+        b) apply the new flags to the current demux stream if any. Possibly try
+           to receive on this stream. If it succeeds, continue to next stream. If
+           it fails, stop here for the demux side, and compute the new flags
+           again.
+
+        c) apply the new flags to the current mux stream if any, and try to
+           make it send. If it fails, compute new flags. If it succeeds, go on
+           with other streams (cf d)
+
+        d) once there's no more active stream, check pending lists, first the
+           blocked list, then the fctl list, then the wait list. Entries may
+           move from one list to another based on the new flags.
+
+        e) loop on all pending streams. 0 may be pending as well, just because
+           some data were read, causing a WU to be sent. 0 must be processed
+           before other streams (even before the blocked ones).
+
+
+Note: the wait list still seems strange, maybe in the end it should be the same
+as the blocked list : cannot send because of congestion. Having someone else
+before is a form of congestion and is resolved the same way, by releasing
+pending data. The FCTL list is different because it comes and goes. But for a
+stream to move there at the last moment, it would have had to be subject to
+fctl at the moment it tried to send. The risk here is that each time we try
+to send we move everyone to the fctl list. But in practice only entries *not*
+subject to fctl should appear in the other one.
+
+
+
 -------------------------------
 
 check list (updated 2017-08-04)
