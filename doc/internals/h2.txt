@@ -727,6 +727,90 @@ Proceeding like this requires that the stream0 handler possesses such info :
   - type of message(s) to emit a response for (bit field)
   - message(s) content(s) (need to store ping data, error codes, last sid)
 
+But we have some other challenges :
+  - PING frames must always be processed very quickly, before any other frame
+    type ;
+  - WINDOW_UPDATE must be grouped
+  - it's not possible to store pending PING payload because multiple PING
+    frames must not be coalesced into a single one, so that would force
+    subsequent PING frames to have to wait for the first one to be processed,
+    making it slower and more complicated to handle
+
+So another scheduling proposal is the following :
+
+  - process incoming frames, and send control messages back, except WU.
+    Data frames cause the connection's ACK count to be incremented, as well as
+    the respective stream's, which also gets woken up with cause WU.
+
+  - send connection's WU if any is needed
+
+  - process active streams :
+     - for each of them, try to send WU
+     - then send response data if needed
+
+
+Another problem: some operations modify the current state and must not be
+retried. For now our handling of the settings frames is wrong because we
+may retry and increase the window multiple times. Let's check per frame type :
+
+  - DATA          : per-stream, not easily retryable, must send WU for
+                    connection and stream.
+                    => postpone but before processing responses in order to
+                       avoid delaying them too much
+  - HEADERS       : per-stream, no response expected, though may send RST_STREAM
+  - PRIORITY      : per-stream, no response expected, may send RST_STREAM
+  - RST_STREAM    : per-stream, no response expected
+  - SETTINGS      : per-connection, ACK expected, may lead to GOAWAY, ACK speed
+                    not sensitive, not retryable (too tricky).
+                    => postpone ACK
+  - PUSH_PROMISE  : per-stream, no response expected, may send RST_STREAM
+  - PING          : per-connection, immediate response expected, retryable
+                    => synchronous PING ACK
+  - GOAWAY        : per-connection, no response needed.
+  - WINDOW_UPDATE : per-stream and per-connection, no response needed but may
+                    unlock data sending (asynchronous)
+  - CONTINUATION  : like HEADERS, per stream and no response needed.
+
+=> RST_STREAM is per stream and needs to be sent by the stream itself
+=> GOAWAY needs to be sent by the connection, the latest possible (after sending
+   everything else). Will be problematic to stop processing new streams.
+=> SETTINGS ACK must be delayed.
+=> PING ACK must be synchronous
+=> WINDOW UPDATE must be delayed
+
+Otherwise have 3 states for frames :
+  FRAME_H : frame header : fill the header
+  FRAME_P : frame payload : retrieve data and process them
+  FRAME_A : frame ACK : don't process data twice but forge the ACK.
+
+
+
+            INIT
+             |
+             |
+             V
+          PREFACE
+             |
+             |
+             V
+         SETTINGS1
+             |
+             |
+             V
+      ,-> FRAME_H -----.
+      |      |          \
+      |      |           >- ERROR --> ERROR2
+      |      V          /   ^
+      |   FRAME_P -----'   /
+      |     | |           /
+      '-----+ |          /
+      ^       V         /
+      |   FRAME_A -----'
+      |      |
+      '------'
+
+
+
 
 -------------------------------
 
