@@ -679,6 +679,54 @@ to send we move everyone to the fctl list. But in practice only entries *not*
 subject to fctl should appear in the other one.
 
 
+2017-08-17 -- splitting the control plane and the data plane
+------------------------------------------------------------
+
+One of the challenges in the H2 implementation is to send the WINDOW_UPDATE
+frames "just in time", ie not too late otherwise there's a risk of HOL causing
+a deadlock if the client does the same, and not too often in order to aggregate
+them for the connection.
+
+Doing both encoding and muxing creates some conflation about the two activities
+which are control plane and data plane. In fact, access to the MUX has to be
+split like this :
+  - access request for control messages (SETTINGS, PING, GOAWAY, RST_STREAM and
+    WINDOW_UPDATE, PRIORITY)
+
+  - access request for data messages (HEADERS, CONTINUATION, DATA, PUSH_PROMISE)
+
+By having streams subscribe to ctrl/data/both, it becomes possible to handle
+all WINDOW_UPDATE and similar control messages before data. One solution could
+consist in always dealing with stream 0 before other streams but it's a bit
+complicated in the event loop as we'd possibly wake it up all the time as data
+are consumed.
+
+Thus the loop will look like this :
+
+  - handle all control messages
+
+  - handle all data messages
+
+  - receive new messages
+
+  - loop
+
+Stream 0 is the only one capable of sending control messages other than
+WINDOW_UPDATE. In fact the PRIORITY frame may be sent by other streams too once
+implemented so that justifies the existence of generalized control messages.
+The other streams are the only ones capable of sending data messages. Thus as a
+first step it may make sense to stay on this model :
+
+  - handle all control+data response messages
+
+  - receive new messages
+
+  - loop
+
+Proceeding like this requires that the stream0 handler possesses such info :
+  - type of message(s) to emit a response for (bit field)
+  - message(s) content(s) (need to store ping data, error codes, last sid)
+
 
 -------------------------------
 
