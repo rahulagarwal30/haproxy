@@ -1697,13 +1697,6 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 			 */
 			int dfl, dft, dsi;
 
-			/* just for debugging */
-			if ((ret = bo_getblk(req, in->str, req->buf->o, 0)) > 0) {
-				fprintf(stderr, "[%d] -- %d bytes received ---\n", appctx->st0, ret);
-				debug_hexdump(stderr, "[H2RD] ", in->str, 0, ret);
-				fprintf(stderr, "----------------------------\n");
-			}
-
 			ret = h2_peek_frame_header(req, &dfl, &dft, &dsi);
 			if (ret < 0) {
 				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
