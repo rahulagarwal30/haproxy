@@ -37,6 +37,7 @@ enum h2_ft {
 	H2_FT_PING            = 0x06,     // RFC7540 #6.7
 	H2_FT_GOAWAY          = 0x07,     // RFC7540 #6.8
 	H2_FT_WINDOW_UPDATE   = 0x08,     // RFC7540 #6.9
+	H2_FT_CONTINUATION    = 0x09,     // RFC7540 #6.10
 	H2_FT_ENTRIES /* must be last */
 } __attribute__((packed));
 
