@@ -117,6 +117,7 @@ struct h2c {
 	int dsi; /* demux stream ID (<0 = idle) */
 	int dfl; /* demux frame length (if dsi >= 0) */
 	int dft; /* demux frame type (+ flags) (if dsi >= 0) */
+	int last_sid; /* last stream ID after a GOAWAY was sent (<0 = none) */
 
 	/* states for the mux direction */
 	int msi; /* mux stream ID (<0 = idle) */

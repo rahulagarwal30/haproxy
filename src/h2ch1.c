@@ -2037,6 +2037,7 @@ int h2c_frt_init(struct stream *s)
 	h2c->flags = H2_CF_NONE;
 	h2c->dsi = -1;
 	h2c->msi = -1;
+	h2c->last_sid = -1;
 	h2c->miw = 65535; /* mux initial window size */
 	h2c->mws = 65535; /* mux window size */
 	h2c->mfs = 16384; /* initial max frame size */
