@@ -1529,6 +1529,10 @@ static int h2c_frt_make_resp_data(struct h2c *h2c, struct h2s *h2s, struct chunk
 	 * that we can use a separate list of streams which are immediately
 	 * unblocked on window opening. Note: we don't implement padding.
 	 */
+
+	if (size > h2m->chn->buf->o)
+		size = h2m->chn->buf->o;
+
 	if (size > h2s->mws)
 		size = h2s->mws;
 
