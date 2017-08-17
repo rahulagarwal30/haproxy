@@ -132,6 +132,7 @@ const char *h2_cs_strings[H2_CS_ENTRIES] = {
 	[H2_CS_SETTINGS1]     = "settings1",
 	[H2_CS_FRAME_H]       = "frame-h",
 	[H2_CS_FRAME_P]       = "frame-p",
+	[H2_CS_FRAME_A]       = "frame-a",
 	[H2_CS_ERROR]         = "error",
 	[H2_CS_ERROR2]        = "error2",
 };
@@ -339,7 +340,7 @@ static int h2c_frt_ack_ping(struct h2c *h2c, const char *payload)
 	memcpy(str + 9, payload, 8);
 	ret = bi_putblk(res, str, 17);
  end:
-	fprintf(stderr, "[%d] sent settings ACK = %d\n", appctx->st0, ret);
+	fprintf(stderr, "[%d] sent PING ACK = %d\n", appctx->st0, ret);
 
 	/* success: >= 0 ; wait: -1; failure: < -1 */
 	return ret + 1;
@@ -544,8 +545,7 @@ static int h2c_frt_handle_settings(struct h2c *h2c, const char *payload, int ple
 		payload += 6;
 		plen -= 6;
 	}
-
-	return h2c_frt_ack_settings(h2c);
+	return 1;
 }
 
 /* processes a WINDOW_UPDATE frame whose payload is <payload> for <plen> bytes.
@@ -589,6 +589,9 @@ static int h2c_frt_handle_window_update(struct h2c *h2c, const char *payload, in
 	else
 		h2c->mws += inc;
 
+	/* schedule a response */
+	if (!(h2_ff(h2c->dft) & H2_F_PING_ACK))
+		h2c->appctx->st0 = H2_CS_FRAME_A;
 	return 1;
 }
 
@@ -647,10 +650,9 @@ static int h2c_frt_handle_ping(struct h2c *h2c, const char *payload)
 		h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
 		return -1;
 	}
-
+	/* schedule a response */
 	if (!(h2_ff(h2c->dft) & H2_F_PING_ACK))
-		return h2c_frt_ack_ping(h2c, payload);
-
+		h2c->appctx->st0 = H2_CS_FRAME_A;
 	return 1;
 }
 
@@ -1674,7 +1676,7 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 	struct chunk *outbuf = NULL;
 	struct chunk *in = NULL;
 	int frame_len;
-	int ret;
+	int ret = 0;
 
 	in = alloc_trash_chunk();
 	if (!in)
@@ -1763,11 +1765,19 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 
 		switch (h2_ft(h2c->dft)) {
 		case H2_FT_SETTINGS:
-			ret = h2c_frt_handle_settings(h2c, in->str, frame_len);
+			if (appctx->st0 == H2_CS_FRAME_P)
+				ret = h2c_frt_handle_settings(h2c, in->str, frame_len);
+
+			if (appctx->st0 == H2_CS_FRAME_A)
+				ret = h2c_frt_ack_settings(h2c);
 			break;
 
 		case H2_FT_PING:
-			ret = h2c_frt_handle_ping(h2c, in->str);
+			if (appctx->st0 == H2_CS_FRAME_P)
+				ret = h2c_frt_handle_ping(h2c, in->str);
+
+			if (appctx->st0 == H2_CS_FRAME_A)
+				ret = h2c_frt_ack_ping(h2c, in->str);
 			break;
 
 		case H2_FT_PRIORITY:

@@ -31,13 +31,14 @@
 #include <types/task.h>
 
 
-/* H2 connection state, in h2c->st */
+/* H2 connection state, in h2c->appctx->st0 */
 enum h2_cs {
 	H2_CS_INIT,      // created, initialization in progress
 	H2_CS_PREFACE,   // init done, waiting for connection preface
 	H2_CS_SETTINGS1, // preface OK, waiting for first settings frame
 	H2_CS_FRAME_H,   // first settings frame ok, waiting for frame header
 	H2_CS_FRAME_P,   // frame header OK, waiting for frame payload
+	H2_CS_FRAME_A,   // frame payload OK, trying to send ACK frame
 	H2_CS_ERROR,     // send GOAWAY(errcode) and close the connection ASAP
 	H2_CS_ERROR2,    // GOAWAY(errcode) sent, close the connection ASAP
 	H2_CS_ENTRIES    // must be last
