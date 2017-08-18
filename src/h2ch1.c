@@ -1644,8 +1644,6 @@ static int h2c_frt_process_active(struct h2c *h2c, struct h2s *only_h2s, struct 
 				ret = h2c_frt_make_resp_headers(h2c, sid, h2s, outbuf);
 				break;
 			case H2_MS_TRL2: /* this is the end */
-				LIST_DEL(h2c->active_list.n);
-				LIST_INIT(h2c->active_list.n);
 				ret = 0;
 				break;
 			case H2_MS_BODY:
