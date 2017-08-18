@@ -1690,7 +1690,7 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 	if (!outbuf)
 		goto error;
 
-	while (1) {
+	while (!(req->flags & CF_SHUTW)) {
 		if (appctx->st0 == H2_CS_ERROR)
 			goto error;
 
