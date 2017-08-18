@@ -11189,6 +11189,17 @@ smp_fetch_http_first_req(const struct arg *args, struct sample *smp, const char 
 	return 1;
 }
 
+/* return the major HTTP version as 1 or 2 depending on how the request arrived
+ * before being processed.
+ */
+static int
+smp_fetch_http_major(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = (smp->strm->flags & SF_H2TOH1_GW) ? 2 : 1;
+	return 1;
+}
+
 /* Accepts exactly 1 argument of type userlist */
 static int
 smp_fetch_http_auth(const struct arg *args, struct sample *smp, const char *kw, void *private)
@@ -13445,6 +13456,7 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
 	{ "http_auth",       smp_fetch_http_auth,      ARG1(1,USR),      NULL,    SMP_T_BOOL, SMP_USE_HRQHV },
 	{ "http_auth_group", smp_fetch_http_auth_grp,  ARG1(1,USR),      NULL,    SMP_T_STR,  SMP_USE_HRQHV },
 	{ "http_first_req",  smp_fetch_http_first_req, 0,                NULL,    SMP_T_BOOL, SMP_USE_HRQHP },
+	{ "http_major",      smp_fetch_http_major,     0,                NULL,    SMP_T_SINT, SMP_USE_HRQHP },
 	{ "method",          smp_fetch_meth,           0,                NULL,    SMP_T_METH, SMP_USE_HRQHP },
 	{ "path",            smp_fetch_path,           0,                NULL,    SMP_T_STR,  SMP_USE_HRQHV },
 	{ "query",           smp_fetch_query,          0,                NULL,    SMP_T_STR,  SMP_USE_HRQHV },

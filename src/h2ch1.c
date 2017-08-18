@@ -443,6 +443,7 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 //	 * fe->accept().
 //	 */
 //	s->flags = SF_ASSIGNED|SF_ADDR_SET;
+	s->flags |= SF_H2TOH1_GW;
 
 	/* applet is waiting for data */
 	si_applet_cant_get(&s->si[0]);

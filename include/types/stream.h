@@ -91,6 +91,7 @@
 #define SF_IGNORE_PRST	0x00080000	/* ignore persistence */
 
 #define SF_SRV_REUSED   0x00100000	/* the server-side connection was reused */
+#define SF_H2TOH1_GW    0x00200000      /* traffic comes from the H2 to H1 gateway */
 
 /* some external definitions */
 struct strm_logs {
