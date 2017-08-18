@@ -29,6 +29,14 @@
 #include <types/stream.h>
 #include <proto/channel.h>
 
+#if defined(DEBUG_H2)
+#define h2_fprintf fprintf
+#define h2_hexdump debug_hexdump
+#else
+#define h2_fprintf(...) do { } while (0)
+#define h2_hexdump(...) do { } while (0)
+#endif
+
 /* human-readable stream and connection state names */
 extern const char *h2_cs_strings[H2_CS_ENTRIES];
 extern const char *h2_ss_strings[H2_SS_ENTRIES];

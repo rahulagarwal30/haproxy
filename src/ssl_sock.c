@@ -4897,7 +4897,9 @@ static int ssl_sock_to_buf(struct connection *conn, struct buffer *buf, int coun
 			goto out_error;
 		}
 		if (ret > 0) {
+#ifdef DEBUG_H2
 			debug_hexdump(stderr, "[SSLR] ", bi_end(buf), 0, ret);
+#endif
 			buf->i += ret;
 			done += ret;
 			count -= ret;
@@ -5014,7 +5016,9 @@ static int ssl_sock_from_buf(struct connection *conn, struct buffer *buf, int fl
 			goto out_error;
 		}
 		if (ret > 0) {
+#ifdef DEBUG_H2
 			debug_hexdump(stderr, "[SSLW] ", bo_ptr(buf), 0, ret);
+#endif
 			conn->xprt_st &= ~SSL_SOCK_SEND_UNLIMITED;
 
 			buf->o -= ret;

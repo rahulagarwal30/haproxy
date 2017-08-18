@@ -133,7 +133,7 @@ int frontend_accept(struct stream *s)
 	if (fe->mode == PR_MODE_HTTP) {
 		s->req.flags |= CF_READ_DONTWAIT; /* one read is usually enough */
 		if (alpn_len == 2 && alpn_str && alpn_str[0] == 'h' && alpn_str[1] == '2') {
-			fprintf(stderr, "H2 requested!\n");
+			h2_fprintf(stderr, "H2 requested!\n");
 			if (!h2c_frt_init(s))
 				goto out_return;
 			return 1;

@@ -52,7 +52,6 @@
 #include <proto/stream_interface.h>
 #include <proto/task.h>
 
-
 static void h2c_frt_io_handler(struct appctx *appctx);
 static void h2c_frt_release_handler(struct appctx *appctx);
 static void h2s_frt_io_handler(struct appctx *appctx);
@@ -217,7 +216,7 @@ static int h2c_frt_snd_settings(struct h2c *h2c)
 	ret = bi_putchk(res, &buf);
 
  end:
-	fprintf(stderr, "[%d] sent settings = %d\n", appctx->st0, ret);
+	h2_fprintf(stderr, "[%d] sent settings = %d\n", appctx->st0, ret);
 
 	/* success: >= 0 ; wait: -1; failure: < -1 */
 	return ret + 1;
@@ -248,7 +247,7 @@ static int h2c_frt_ack_settings(struct h2c *h2c)
 			"\x00\x00\x00\x00" /* stream ID */, 9);
 
  end:
-	fprintf(stderr, "[%d] sent settings ACK = %d\n", appctx->st0, ret);
+	h2_fprintf(stderr, "[%d] sent settings ACK = %d\n", appctx->st0, ret);
 
 	/* success: >= 0 ; wait: -1; failure: < -1 */
 	return ret + 1;
@@ -281,7 +280,7 @@ static int h2c_frt_window_update(struct h2c *h2c, int sid, uint32_t increment)
 
 	ret = bi_putblk(res, str, 13);
  end:
-	fprintf(stderr, "[%d] sent WINDOW_UPDATE (%d,%u) = %d\n", appctx->st0, sid, increment, ret);
+	h2_fprintf(stderr, "[%d] sent WINDOW_UPDATE (%d,%u) = %d\n", appctx->st0, sid, increment, ret);
 
 	/* success: >= 0 ; wait: -1; failure: < -1 */
 	return ret + 1;
@@ -340,7 +339,7 @@ static int h2c_frt_ack_ping(struct h2c *h2c, const char *payload)
 	memcpy(str + 9, payload, 8);
 	ret = bi_putblk(res, str, 17);
  end:
-	fprintf(stderr, "[%d] sent PING ACK = %d\n", appctx->st0, ret);
+	h2_fprintf(stderr, "[%d] sent PING ACK = %d\n", appctx->st0, ret);
 
 	/* success: >= 0 ; wait: -1; failure: < -1 */
 	return ret + 1;
@@ -375,7 +374,7 @@ static int h2c_frt_send_goaway_error(struct h2c *h2c)
 
 	ret = bi_putblk(res, str, 17);
  end:
-	fprintf(stderr, "[%d] sent GOAWAY (%d,%x) = %d\n", appctx->st0, h2c->max_id, h2c->errcode, ret);
+	h2_fprintf(stderr, "[%d] sent GOAWAY (%d,%x) = %d\n", appctx->st0, h2c->max_id, h2c->errcode, ret);
 
 	/* success: >= 0 ; wait: -1; failure: < -1 */
 	return ret + 1;
@@ -396,14 +395,14 @@ static struct h2s *h2c_stream_new(struct h2c *h2c, int id)
 	struct eb32_node *node = eb32_lookup(&h2c->streams_by_id, id);
 	if (node) {
 		h2s = container_of(node, struct h2s, by_id);
-		fprintf(stderr, "%s:%d(%s): BUG!: h2c=%p id=%d ret=%p id=%d\n", __FILE__, __LINE__, __FUNCTION__, h2c, id, h2s, id);
+		h2_fprintf(stderr, "%s:%d(%s): BUG!: h2c=%p id=%d ret=%p id=%d\n", __FILE__, __LINE__, __FUNCTION__, h2c, id, h2s, id);
 	}
 
 	if (!id)
-		fprintf(stderr, "%s:%d(%s): BUG!: h2c=%p id=%d\n", __FILE__, __LINE__, __FUNCTION__, h2c, id);
+		h2_fprintf(stderr, "%s:%d(%s): BUG!: h2c=%p id=%d\n", __FILE__, __LINE__, __FUNCTION__, h2c, id);
 
 	if (id <= h2c->max_id)
-		fprintf(stderr, "%s:%d(%s): BUG!: h2c=%p id=%d <= max_id=%d\n", __FILE__, __LINE__, __FUNCTION__, h2c, id, h2c->max_id);
+		h2_fprintf(stderr, "%s:%d(%s): BUG!: h2c=%p id=%d <= max_id=%d\n", __FILE__, __LINE__, __FUNCTION__, h2c, id, h2c->max_id);
 	/* /DEBUG */
 
 	h2s = pool_alloc2(pool2_h2s);
@@ -1241,35 +1240,35 @@ static int h2c_frt_handle_headers(struct h2c *h2c, const char *payload, struct c
 	struct h2s *h2s;
 
 	if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM)
-		fprintf(stderr, "[4] HEADERS with END_STREAM\n");
+		h2_fprintf(stderr, "[4] HEADERS with END_STREAM\n");
 	if (h2_ff(h2c->dft) & H2_F_HEADERS_END_HEADERS)
-		fprintf(stderr, "[4] HEADERS with END_HEADERS\n");
+		h2_fprintf(stderr, "[4] HEADERS with END_HEADERS\n");
 	if (h2_ff(h2c->dft) & H2_F_HEADERS_PADDED)
-		fprintf(stderr, "[4] HEADERS with PADDED\n");
+		h2_fprintf(stderr, "[4] HEADERS with PADDED\n");
 	if (h2_ff(h2c->dft) & H2_F_HEADERS_PRIORITY)
-		fprintf(stderr, "[4] HEADERS with PRIORITY\n");
+		h2_fprintf(stderr, "[4] HEADERS with PRIORITY\n");
 
 	h2s = h2c_st_by_id(h2c, h2c->dsi);
-	fprintf(stderr, "    [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
+	h2_fprintf(stderr, "    [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
 
 	if (h2s->st != H2_SS_IDLE) {
 		/* stream already exists, we might just be coming back from a
 		 * previously failed allocation.
 		 */
 		if (h2s->st != H2_SS_INIT) {
-			fprintf(stderr, "    received headers frame at state %s for stream %d!", h2_ss_str(h2s->st), h2c->dsi);
+			h2_fprintf(stderr, "    received headers frame at state %s for stream %d!", h2_ss_str(h2s->st), h2c->dsi);
 			h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
 		}
 	}
 	else if (h2c->dsi <= h2c->max_id) {
-		fprintf(stderr, "    reused ID %d (max_id=%d)!", h2c->dsi, h2c->max_id);
+		h2_fprintf(stderr, "    reused ID %d (max_id=%d)!", h2c->dsi, h2c->max_id);
 		h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
 		return -1;
 	}
 	else {
 		h2s = h2c_stream_new(h2c, h2c->dsi);
 		if (!h2s) {
-			fprintf(stderr, "    failed to allocate h2s stream for ID %d!", h2c->dsi);
+			h2_fprintf(stderr, "    failed to allocate h2s stream for ID %d!", h2c->dsi);
 			h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
 			return -1;
 		}
@@ -1290,7 +1289,7 @@ static int h2c_frt_handle_headers(struct h2c *h2c, const char *payload, struct c
 	if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM)
 		h2s->st = H2_SS_HREM;
 
-	fprintf(stderr, " [newh2s=%p:%s]\n", h2s, h2_ss_str(h2s->st));
+	h2_fprintf(stderr, " [newh2s=%p:%s]\n", h2s, h2_ss_str(h2s->st));
 
 	if (h2_ff(h2c->dft) & H2_F_HEADERS_END_STREAM) {
 		// FIXME: ignore PAD, StreamDep and PRIO for now
@@ -1312,17 +1311,17 @@ static int h2c_frt_handle_headers(struct h2c *h2c, const char *payload, struct c
 
 		outbuf->len = hpack_decode_frame(h2c->ddht, hdrs, flen, outbuf->str, outbuf->size - 1);
 		if (outbuf->len < 0) {
-			//fprintf(stderr, "hpack_decode_frame() = %d\n", outbuf->len);
+			//h2_fprintf(stderr, "hpack_decode_frame() = %d\n", outbuf->len);
 			h2c_error(h2c, H2_ERR_INTERNAL_ERROR);
 			return -1;
 		}
 
 		outbuf->str[outbuf->len] = 0;
-		fprintf(stderr, "request: %d bytes :\n<%s>\n", outbuf->len, outbuf->str);
+		h2_fprintf(stderr, "request: %d bytes :\n<%s>\n", outbuf->len, outbuf->str);
 
 		if (bi_putchk(si_ic(h2s->appctx->owner), outbuf) < 0) {
 			si_applet_cant_put(h2s->appctx->owner);
-			printf("failed to copy to h2s buffer\n");
+			h2_fprintf(stderr, "failed to copy to h2s buffer\n");
 		}
 
 		/* FIXME: certainly not sufficient */
@@ -1342,17 +1341,17 @@ static int h2c_frt_handle_priority(struct h2c *h2c, const char *payload)
 {
 	struct h2s *h2s;
 
-	fprintf(stderr, "   ");
+	h2_fprintf(stderr, "   ");
 	if (payload[0] & 0x80)
-		fprintf(stderr, " [EXCLUSIVE] ");
+		h2_fprintf(stderr, " [EXCLUSIVE] ");
 
-	fprintf(stderr, " [dep=%d] ", ((payload[0] & 0x7f)<<24) + ((unsigned char)payload[1] << 16) + ((unsigned char)payload[2] << 8) + (unsigned char)payload[3]);
+	h2_fprintf(stderr, " [dep=%d] ", ((payload[0] & 0x7f)<<24) + ((unsigned char)payload[1] << 16) + ((unsigned char)payload[2] << 8) + (unsigned char)payload[3]);
 
-	fprintf(stderr, " [weight=%d] ", (unsigned char)payload[4]);
+	h2_fprintf(stderr, " [weight=%d] ", (unsigned char)payload[4]);
 
 	h2s = h2c_st_by_id(h2c, h2c->dsi);
-	fprintf(stderr, " [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
-	fprintf(stderr, "\n");
+	h2_fprintf(stderr, " [h2s=%p:%s]", h2s, h2_ss_str(h2s->st));
+	h2_fprintf(stderr, "\n");
 	return 1;
 }
 
@@ -1366,24 +1365,24 @@ static int h2c_frt_handle_data(struct h2c *h2c, const char *payload, int plen)
 	/* FIXME: drops data for now */
 
 	if (h2_ff(h2c->dft) & H2_F_DATA_END_STREAM)
-		fprintf(stderr, "[4] DATA with END_STREAM\n");
+		h2_fprintf(stderr, "[4] DATA with END_STREAM\n");
 	if (h2_ff(h2c->dft) & H2_F_DATA_PADDED)
-		fprintf(stderr, "[4] DATA with PADDED\n");
+		h2_fprintf(stderr, "[4] DATA with PADDED\n");
 
 	h2c->rcvd_c += plen;
 	h2c->rcvd_s += plen; // warning, this can also affect the closed streams!
 
 	h2s = h2c_st_by_id(h2c, h2c->dsi);
-	fprintf(stderr, "    [h2s=%p:%s] rcvd_c=%u rcvd_s=%u", h2s, h2_ss_str(h2s->st), h2c->rcvd_c, h2c->rcvd_s);
+	h2_fprintf(stderr, "    [h2s=%p:%s] rcvd_c=%u rcvd_s=%u", h2s, h2_ss_str(h2s->st), h2c->rcvd_c, h2c->rcvd_s);
 
 	if (h2s->st == H2_SS_OPEN && (h2_ff(h2c->dft) & H2_F_DATA_END_STREAM))
 		h2s->st = H2_SS_HREM;
-	fprintf(stderr, " [h2s=%p:%s]\n", h2s, h2_ss_str(h2s->st));
+	h2_fprintf(stderr, " [h2s=%p:%s]\n", h2s, h2_ss_str(h2s->st));
 
 	{
 		static unsigned int foo;
 		foo += plen;
-		fprintf(stderr, "stream=%d total = %u\n", h2c->dsi, foo);
+		h2_fprintf(stderr, "stream=%d total = %u\n", h2c->dsi, foo);
 	}
 #define DONT_CLOSE
 #ifndef DONT_CLOSE
@@ -1464,7 +1463,7 @@ static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, struct h2s *h2s, 
 	}
 
  end:
-	fprintf(stderr, "[%d] sent simple H2 response (sid=%d) = %d bytes (%d in, ep=%u, es=%s)\n", appctx->st0, sid, ret, skip, h2m->err_pos, http_msg_state_str(h2m->err_state));
+	h2_fprintf(stderr, "[%d] sent simple H2 response (sid=%d) = %d bytes (%d in, ep=%u, es=%s)\n", appctx->st0, sid, ret, skip, h2m->err_pos, http_msg_state_str(h2m->err_state));
 
 	/* success: >= 0 ; wait: -1; failure: < -1 */
 	return ret + 1;
@@ -1604,19 +1603,19 @@ static int h2c_frt_make_resp_data(struct h2c *h2c, struct h2s *h2s, struct chunk
 	}
 
  end:
-	fprintf(stderr, "[%d] sent simple H2 DATA response (sid=%d) = %d bytes (%d in, ep=%u, es=%s, h2cws=%d h2sws=%d)\n", appctx->st0, h2s->id, ret, size, h2m->err_pos, http_msg_state_str(h2m->err_state), h2c->mws, h2s->mws);
+	h2_fprintf(stderr, "[%d] sent simple H2 DATA response (sid=%d) = %d bytes (%d in, ep=%u, es=%s, h2cws=%d h2sws=%d)\n", appctx->st0, h2s->id, ret, size, h2m->err_pos, http_msg_state_str(h2m->err_state), h2c->mws, h2s->mws);
 
 	/* success: >= 0 ; wait: -1; failure: < -1 */
 	return ret + 1;
 
  blocked_conn:
 	/* FIXME: subscribe to blocked list */
-	fprintf(stderr, "### blocked_conn\n");
+	h2_fprintf(stderr, "### blocked_conn\n");
 	return 0;
 
  blocked_strm:
 	/* FIXME: subscribe to blocked list */
-	fprintf(stderr, "### blocked_strm\n");
+	h2_fprintf(stderr, "### blocked_strm\n");
 	return 0;
 }
 
@@ -1671,7 +1670,7 @@ static int h2c_frt_process_active(struct h2c *h2c, struct h2s *only_h2s, struct 
 		LIST_INIT(&h2s->list);
 
 		if (h2s->st == H2_SS_CLOSED) {
-			//fprintf(stderr, "########## closing stream %p[%d] ###########\n", h2s, h2s->id);
+			//h2_fprintf(stderr, "########## closing stream %p[%d] ###########\n", h2s, h2s->id);
 			si_shutr((struct stream_interface *)h2s->appctx->owner);
 			h2s->req.chn->flags |= CF_READ_NULL;
 
@@ -1728,7 +1727,7 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 			if (ret == 0)
 				goto out_empty;
 
-			fprintf(stderr, "[%d] Received frame of %d bytes, type %d (%s), flags %02x, sid %d [max_id=%d]\n",
+			h2_fprintf(stderr, "[%d] Received frame of %d bytes, type %d (%s), flags %02x, sid %d [max_id=%d]\n",
 				appctx->st0, dfl,
 				dft & 0xff, h2_ft_str(dft),
 				dft >> 8, dsi, h2c->max_id);
@@ -1764,18 +1763,18 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 		frame_len = bo_getblk(req, in->str, h2c->dfl, 0);
 		if (h2c->dfl && frame_len <= 0) {
 			if (frame_len < 0 || req->buf->o == req->buf->size) {
-				fprintf(stderr, "[%d] Truncated frame payload: %d/%d bytes read only\n", appctx->st0, req->buf->o, h2c->dfl);
+				h2_fprintf(stderr, "[%d] Truncated frame payload: %d/%d bytes read only\n", appctx->st0, req->buf->o, h2c->dfl);
 				h2c_error(h2c, H2_ERR_FRAME_SIZE_ERROR);
 				goto error;
 			}
-			fprintf(stderr, "[%d] Received incomplete frame (%d/%d bytes), waiting [cflags=0x%08x]\n", appctx->st0, req->buf->o, h2c->dfl, req->flags);
+			h2_fprintf(stderr, "[%d] Received incomplete frame (%d/%d bytes), waiting [cflags=0x%08x]\n", appctx->st0, req->buf->o, h2c->dfl, req->flags);
 			goto out_empty;
 		}
 
 		if (frame_len > 0) {
-			fprintf(stderr, "[%d] Frame payload: %d bytes :\n", appctx->st0, h2c->dfl);
-			debug_hexdump(stderr, "[H2RD] ", in->str, 0, h2c->dfl);
-			fprintf(stderr, "--------------\n");
+			h2_fprintf(stderr, "[%d] Frame payload: %d bytes :\n", appctx->st0, h2c->dfl);
+			h2_hexdump(stderr, "[H2RD] ", in->str, 0, h2c->dfl);
+			h2_fprintf(stderr, "--------------\n");
 		}
 
 		switch (h2_ft(h2c->dft)) {
@@ -1913,7 +1912,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 	h2c->flags &= ~H2_CF_BUFFER_FULL;
 
 	if (appctx->st0 == H2_CS_INIT) {
-		fprintf(stderr, "[%d] H2: first call\n", appctx->st0);
+		h2_fprintf(stderr, "[%d] H2: first call\n", appctx->st0);
 		ret = h2c_frt_snd_settings(h2c);
 		if (!ret)
 			goto out;
@@ -1931,9 +1930,9 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 
 		if (ret != sizeof(h2_conn_preface) ||
 		    memcmp(preface, h2_conn_preface, sizeof(h2_conn_preface)) != 0) {
-			fprintf(stderr, "[%d] Received bad preface (%d bytes) :\n", appctx->st0, ret);
-			debug_hexdump(stderr, "[H2RD] ", preface, 0, ret);
-			fprintf(stderr, "--------------\n");
+			h2_fprintf(stderr, "[%d] Received bad preface (%d bytes) :\n", appctx->st0, ret);
+			h2_hexdump(stderr, "[H2RD] ", preface, 0, ret);
+			h2_fprintf(stderr, "--------------\n");
 			si_shutr(si);
 			res->flags |= CF_READ_NULL;
 			si_shutw(si);
@@ -1941,7 +1940,7 @@ static void h2c_frt_io_handler(struct appctx *appctx)
 		}
 
 		bo_skip(req, ret);
-		fprintf(stderr, "[%d] H2: preface found (%d bytes)!\n", appctx->st0, ret);
+		h2_fprintf(stderr, "[%d] H2: preface found (%d bytes)!\n", appctx->st0, ret);
 		appctx->st0 = H2_CS_SETTINGS1;
 	}
 
@@ -2103,12 +2102,12 @@ static void h2s_frt_io_handler(struct appctx *appctx)
 	struct h2c *h2c = h2s->h2c;
 
 	/* FIXME: to do later */
-	fprintf(stderr, "in %s : h2s=%p h2c=%p req->i=%d res->o=%d res->i=%d\n", __FUNCTION__, h2s, h2c, req->buf->i, res->buf->o, res->buf->i);
+	h2_fprintf(stderr, "in %s : h2s=%p h2c=%p req->i=%d res->o=%d res->i=%d\n", __FUNCTION__, h2s, h2c, req->buf->i, res->buf->o, res->buf->i);
 
 	if (res->buf->o || (res->flags & CF_SHUTW))
 		LIST_ADDQ(&h2c->active_list, &h2s->list);
 
-	debug_hexdump(stderr, "[H1RD] ", res->buf->data, 0, res->buf->o);
+	h2_hexdump(stderr, "[H1RD] ", res->buf->data, 0, res->buf->o);
 
 	h2c_frt_process_frames(h2c, h2s);
 
@@ -2134,7 +2133,7 @@ static void h2s_frt_release_handler(struct appctx *appctx)
 	struct h2s *h2s = appctx->ctx.h2s.ctx;
 
 	/* FIXME: to do later */
-	fprintf(stderr, "in %s\n", __FUNCTION__);
+	h2_fprintf(stderr, "in %s\n", __FUNCTION__);
 	if (!LIST_ISEMPTY(&h2s->list))
 		LIST_DEL(&h2s->list);
 }
