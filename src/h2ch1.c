@@ -1848,6 +1848,8 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 	 * move on the H2C side.
 	 */
 	if (only_h2s) {
+		if ((si_ic(si)->buf->i + si_ic(si)->buf->o) || (si_ic(si)->flags & CF_SHUTW_NOW))
+			si_applet_cant_put(si);
 		si_applet_wake_cb(si);
 		channel_release_buffer(si_ic(si), &appctx->buffer_wait);
 	}
@@ -1861,6 +1863,8 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 	 * move on the H2C side.
 	 */
 	if (only_h2s) {
+		if ((si_ic(si)->buf->i + si_ic(si)->buf->o) || (si_ic(si)->flags & CF_SHUTW_NOW))
+			si_applet_cant_put(si);
 		si_applet_wake_cb(si);
 		channel_release_buffer(si_ic(si), &appctx->buffer_wait);
 	}
