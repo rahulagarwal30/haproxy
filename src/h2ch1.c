@@ -1399,11 +1399,12 @@ static int h2c_frt_handle_data(struct h2c *h2c, const char *payload, int plen)
  * using <outbuf> as a temporary output buffer. Returns 0 if not possible yet,
  * <0 on error, >0 on success.
  */
-static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, struct h2m *h2m, struct chunk *outbuf)
+static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, struct h2s *h2s, struct chunk *outbuf)
 {
 	struct appctx *appctx = h2c->appctx;
 	struct stream_interface *si = appctx->owner;
 	struct channel *res = si_ic(si);
+	struct h2m *h2m = &h2s->res;
 	int ret = -1;
 	int skip = 0;
 	int es_now = 0;
@@ -1451,8 +1452,13 @@ static int h2c_frt_make_resp_headers(struct h2c *h2c, int sid, struct h2m *h2m, 
 		/* for now we don't implemented CONTINUATION, so we wait for a
 		 * body or directly end in TRL2.
 		 */
-		if (es_now)
+		if (es_now) {
 			h2m->state = H2_MS_TRL2;
+			if (h2s->st == H2_SS_OPEN)
+				h2s->st = H2_SS_HLOC;
+			else
+				h2s->st = H2_SS_CLOSED;
+		}
 		else
 			h2m->state = (h2m->flags & H2_MF_CLEN) ? H2_MS_BODY : H2_MS_BSIZE;
 	}
@@ -1587,9 +1593,14 @@ static int h2c_frt_make_resp_data(struct h2c *h2c, struct h2s *h2s, struct chunk
 			h2m->state = H2_MS_BCRLF;
 			goto new_frame;
 		}
-		/* no trailers for now */
-		if (es_now)
+		if (es_now) {
+			if (h2s->st == H2_SS_OPEN)
+				h2s->st = H2_SS_HLOC;
+			else
+				h2s->st = H2_SS_CLOSED;
+			/* no trailers for now */
 			h2m->state = H2_MS_TRL2;
+		}
 	}
 
  end:
@@ -1630,7 +1641,7 @@ static int h2c_frt_process_active(struct h2c *h2c, struct h2s *only_h2s, struct 
 			switch (h2s->res.state) {
 			case H2_MS_HDR0:
 			case H2_MS_HDR1: /* not used right now */
-				ret = h2c_frt_make_resp_headers(h2c, sid, &h2s->res, outbuf);
+				ret = h2c_frt_make_resp_headers(h2c, sid, h2s, outbuf);
 				break;
 			case H2_MS_TRL2: /* this is the end */
 				LIST_DEL(h2c->active_list.n);
@@ -1656,10 +1667,19 @@ static int h2c_frt_process_active(struct h2c *h2c, struct h2s *only_h2s, struct 
 				h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
 				return -1;
 			}
-		} while (ret > 0 && h2s->res.state != H2_MS_TRL2);
+		} while (ret > 0 && h2s->st != H2_SS_CLOSED && h2s->res.state != H2_MS_TRL2);
 
 		LIST_DEL(&h2s->list);
 		LIST_INIT(&h2s->list);
+
+		if (h2s->st == H2_SS_CLOSED) {
+			//fprintf(stderr, "########## closing stream %p[%d] ###########\n", h2s, h2s->id);
+			si_shutr((struct stream_interface *)h2s->appctx->owner);
+			h2s->req.chn->flags |= CF_READ_NULL;
+
+			if (!only_h2s)
+				si_applet_wake_cb(h2s->appctx->owner);
+		}
 	}
 	return 1;
 }
@@ -2099,8 +2119,16 @@ static void h2s_frt_io_handler(struct appctx *appctx)
 		LIST_INIT(&h2s->list);
 	}
 
-	si_applet_cant_get(si);
-	si_applet_stop_put(si);
+	if (h2s->st != H2_SS_CLOSED) {
+		si_applet_cant_get(si);
+		si_applet_stop_put(si);
+	}
+	else {
+		si_shutr(si);
+		req->flags |= CF_READ_NULL;
+		if (!(res->flags & CF_SHUTW)) // broken pipe for now
+			si->flags |= SI_FL_ERR;
+	}
 }
 
 static void h2s_frt_release_handler(struct appctx *appctx)
