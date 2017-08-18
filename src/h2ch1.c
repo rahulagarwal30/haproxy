@@ -592,6 +592,50 @@ static int h2c_frt_handle_window_update(struct h2c *h2c, const char *payload, in
 	return 1;
 }
 
+/* Processes an RST_STREAM frame whose payload is <payload> for <plen> bytes.
+ * The indicated stream is closed if not closed yet. Returns 0 if not possible
+ * yet, <0 on error, >0 on success.
+ */
+static int h2c_frt_handle_rst_stream(struct h2c *h2c, const char *payload, int plen)
+{
+	struct h2s *h2s;
+
+	if (h2c->dfl != 4) {
+		/* frame length must be exactly 4 */
+		h2c_error(h2c, H2_ERR_FRAME_SIZE_ERROR);
+		return -1;
+	}
+
+	/* process full frame only */
+	if (plen < h2c->dfl)
+		return 0;
+
+	if (h2c->dsi == 0) {
+		h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+		return -1;
+	}
+
+	h2s = h2c_st_by_id(h2c, h2c->dsi);
+
+	/* it's not an error to receive WU on a closed stream, though
+	 * it's uncertain (but harmless) on an idle one.
+	 */
+	if (h2s->st == H2_SS_IDLE) {
+		h2c_error(h2c, H2_ERR_PROTOCOL_ERROR);
+		return -1;
+	}
+
+	if (h2s->st == H2_SS_CLOSED)
+		return 1;
+
+	h2s->errcode = h2_u32_decode(payload);
+	h2s->st = H2_SS_CLOSED;
+	si_shutr((struct stream_interface *)h2s->appctx->owner);
+	h2s->req.chn->flags |= CF_READ_NULL;
+	si_applet_wake_cb(h2s->appctx->owner);
+	return 1;
+}
+
 /* processes a PING frame and ACKs it if needed. The caller must pass the
  * pointer to the payload in <payload>. Returns 0 if not possible yet, <0 on
  * error, >0 on success.
@@ -1748,6 +1792,10 @@ static int h2c_frt_process_frames(struct h2c *h2c, struct h2s *only_h2s)
 
 		case H2_FT_WINDOW_UPDATE:
 			ret = h2c_frt_handle_window_update(h2c, in->str, frame_len);
+			break;
+
+		case H2_FT_RST_STREAM:
+			ret = h2c_frt_handle_rst_stream(h2c, in->str, frame_len);
 			break;
 
 		default:
