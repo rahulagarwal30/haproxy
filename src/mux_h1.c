@@ -25,6 +25,35 @@
 #include <proto/stream.h>
 #include <proto/stream_interface.h>
 
+#if defined(DEBUG_FULL)
+#	define h1_dbg(...)						\
+	do {								\
+		fprintf(stderr, "[%20.20s:%4d] ", __FUNCTION__, __LINE__);	\
+		fprintf(stderr, ##__VA_ARGS__);				\
+	} while (0)
+#       define h1_dbg_label(h1c) (!conn_is_back((h1c)->conn) ? "CLI" : "SRV")
+#	define h1_dbg_stmt(statement) statement
+#       define h1_dbg_trace(h1c)					\
+	h1_dbg("<%s:%s:%p> h1c->flags=0x%08x - h1s->flags=0x%08x "	\
+	       "- conn->flags=0x%08x\n", (h1c)->conn->mux->name,	\
+	       h1_dbg_label(h1c), (h1c)->conn, (h1c)->flags,		\
+	       ((h1c)->h1s ? (h1c)->h1s->flags : 0),			\
+	       (h1c)->conn->flags)
+
+#       define h1_dbg_htx(pfx, htx)					\
+        h1_dbg("%s [size=%u, data=%u, used=%u, tail=%u,"		\
+	       " front=%u, extra=%lu, flags=0x%08x, wrap=%s]\n", (pfx),	\
+	       (htx)->size, (htx)->data, (htx)->used, (htx)->tail,	\
+	       (htx)->front, (htx)->extra, (htx)->flags,		\
+	       (!(htx)->used || (htx)->tail+1 == (htx)->wrap) ? "NO" : "YES")
+#else
+#	define h1_dbg(x...)
+#       define h1_dbg_label(h1c)
+#	define h1_dbg_stmt(statement)
+#       define h1_dbg_trace(h1c)
+#       define h1_dbg_htx(name, htx)
+#endif
+
 /*
  *  H1 Connection flags (32 bits)
  */
@@ -215,6 +244,7 @@ static struct conn_stream *h1s_new_cs(struct h1s *h1s)
 {
 	struct conn_stream *cs;
 
+	h1_dbg_trace(h1s->h1c);
 	cs = cs_new(h1s->h1c->conn);
 	if (!cs)
 		goto err;
@@ -239,6 +269,8 @@ static struct conn_stream *h1s_new_cs(struct h1s *h1s)
 static struct h1s *h1s_create(struct h1c *h1c, struct conn_stream *cs)
 {
 	struct h1s *h1s;
+
+	h1_dbg_trace(h1c);
 
 	h1s = pool_alloc(pool_head_h1s);
 	if (!h1s)
@@ -301,6 +333,7 @@ static struct h1s *h1s_create(struct h1c *h1c, struct conn_stream *cs)
 
 	/* Reset H1C flags for the next HTTP transaction */
 	h1c->flags &= ~(H1C_F_WAIT_NEXT_REQ|H1C_F_PREFER_LAST);
+	h1_dbg("\t=== H1S %p created (cs=%p)\n", h1s, cs);
 	return h1s;
 
   fail:
@@ -312,6 +345,8 @@ static void h1s_destroy(struct h1s *h1s)
 {
 	if (h1s) {
 		struct h1c *h1c = h1s->h1c;
+
+		h1_dbg_trace(h1c);
 
 		h1c->h1s = NULL;
 
@@ -326,6 +361,7 @@ static void h1s_destroy(struct h1s *h1s)
 		if (h1s->flags & (H1S_F_REQ_ERROR|H1S_F_RES_ERROR))
 			h1c->flags |= H1C_F_CS_ERROR;
 
+		h1_dbg("\t=== H1S %p release (cs=%p)\n", h1s, h1s->cs);
 		cs_free(h1s->cs);
 		pool_free(pool_head_h1s, h1s);
 	}
@@ -377,6 +413,9 @@ static int h1_init(struct connection *conn, struct proxy *proxy)
 
 	conn->mux_ctx = h1c;
 
+	h1_dbg_trace(h1c);
+	h1_dbg("\t=== H1C initialized\n");
+
 	/* Try to read, if nothing is available yet we'll just subscribe */
 	if (h1_recv(h1c))
 		h1_process(h1c);
@@ -403,6 +442,8 @@ static void h1_release(struct connection *conn)
 	LIST_DEL(&conn->list);
 
 	if (h1c) {
+		h1_dbg_trace(h1c);
+
 		if (!LIST_ISEMPTY(&h1c->buf_wait.list)) {
 			HA_SPIN_LOCK(BUF_WQ_LOCK, &buffer_wq_lock);
 			LIST_DEL(&h1c->buf_wait.list);
@@ -417,6 +458,7 @@ static void h1_release(struct connection *conn)
 			tasklet_free(h1c->wait_event.task);
 
 		h1s_destroy(h1c->h1s);
+		h1_dbg("\t=== H1C released\n");
 		if (h1c->wait_event.wait_reason != 0)
 			conn->xprt->unsubscribe(conn, h1c->wait_event.wait_reason,
 			    &h1c->wait_event);
@@ -569,6 +611,8 @@ static void h1_set_cli_conn_mode(struct h1s *h1s, struct h1m *h1m)
 	struct proxy *fe = h1s->h1c->px;
 	int flag = H1S_F_WANT_KAL; /* For client connection: server-close == keepalive */
 
+	h1_dbg_trace(h1s->h1c);
+
 	/* Tunnel mode can only by set on the frontend */
 	if ((fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN)
 		flag = H1S_F_WANT_TUN;
@@ -606,6 +650,8 @@ static void h1_set_cli_conn_mode(struct h1s *h1s, struct h1m *h1m)
 	/* If KAL, check if the frontend is stopping. If yes, switch in CLO mode */
 	if (h1s->flags & H1S_F_WANT_KAL && fe->state == PR_STSTOPPED)
 		h1s->flags = (h1s->flags & ~H1S_F_WANT_MSK) | H1S_F_WANT_CLO;
+
+	h1_dbg("\t=== client conn_mode=0x%08x\n", (h1s->flags & H1S_F_WANT_MSK));
 }
 
 /* Deduce the connection mode of the client connection, depending on the
@@ -620,6 +666,8 @@ static void h1_set_srv_conn_mode(struct h1s *h1s, struct h1m *h1m)
 	struct proxy *fe = sess->fe;
 	struct proxy *be = h1c->px;
 	int flag =  H1S_F_WANT_KAL;
+
+	h1_dbg_trace(h1c);
 
 	/* Tunnel mode can only by set on the frontend */
 	if ((fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN)
@@ -660,12 +708,16 @@ static void h1_set_srv_conn_mode(struct h1s *h1s, struct h1m *h1m)
 	/* If KAL, check if the backend is stopping. If yes, switch in CLO mode */
 	if (h1s->flags & H1S_F_WANT_KAL && be->state == PR_STSTOPPED)
 		h1s->flags = (h1s->flags & ~H1S_F_WANT_MSK) | H1S_F_WANT_CLO;
+
+	h1_dbg("\t=== server conn_mode=0x%08x\n", (h1s->flags & H1S_F_WANT_MSK));
 }
 
 static void h1_update_req_conn_hdr(struct h1s *h1s, struct h1m *h1m,
 				   struct htx *htx, struct ist *conn_val)
 {
 	struct proxy *px = h1s->h1c->px;
+
+	h1_dbg_trace(h1s->h1c);
 
 	/* Don't update "Connection:" header in TUNNEL mode or if "Upgrage"
 	 * token is found
@@ -675,12 +727,14 @@ static void h1_update_req_conn_hdr(struct h1s *h1s, struct h1m *h1m,
 
 	if (h1s->flags & H1S_F_WANT_KAL || px->options2 & PR_O2_FAKE_KA) {
 		if (h1m->flags & H1_MF_CONN_CLO) {
+			h1_dbg("\t=== Remove close in \"Connection:\" header\n");
 			if (conn_val)
 				*conn_val = ist("");
 			if (htx)
 				h1_remove_conn_hdrs(h1m, htx);
 		}
 		if (!(h1m->flags & (H1_MF_VER_11|H1_MF_CONN_KAL))) {
+			h1_dbg("\t=== Add keep-alive in \"Connection:\" header\n");
 			if (conn_val)
 				*conn_val = ist("keep-alive");
 			if (htx)
@@ -689,12 +743,14 @@ static void h1_update_req_conn_hdr(struct h1s *h1s, struct h1m *h1m,
 	}
 	else { /* H1S_F_WANT_CLO && !PR_O2_FAKE_KA */
 		if (h1m->flags & H1_MF_CONN_KAL) {
+			h1_dbg("\t=== Remove keep-alive in \"Connection:\" header\n");
 			if (conn_val)
 				*conn_val = ist("");
 			if (htx)
 				h1_remove_conn_hdrs(h1m, htx);
 		}
 		if ((h1m->flags & (H1_MF_VER_11|H1_MF_CONN_CLO)) == H1_MF_VER_11) {
+			h1_dbg("\t=== Add close in \"Connection:\" header\n");
 			if (conn_val)
 				*conn_val = ist("close");
 			if (htx)
@@ -706,6 +762,8 @@ static void h1_update_req_conn_hdr(struct h1s *h1s, struct h1m *h1m,
 static void h1_update_res_conn_hdr(struct h1s *h1s, struct h1m *h1m,
 					 struct htx *htx, struct ist *conn_val)
 {
+	h1_dbg_trace(h1s->h1c);
+
 	/* Don't update "Connection:" header in TUNNEL mode or if "Upgrage"
 	 * token is found
 	 */
@@ -714,12 +772,14 @@ static void h1_update_res_conn_hdr(struct h1s *h1s, struct h1m *h1m,
 
 	if (h1s->flags & H1S_F_WANT_KAL) {
 		if (h1m->flags & H1_MF_CONN_CLO) {
+			h1_dbg("\t=== Remove close in 'Connection:' header\n");
 			if (conn_val)
 				*conn_val = ist("");
 			if (htx)
 				h1_remove_conn_hdrs(h1m, htx);
 		}
 		if (!(h1m->flags & (H1_MF_VER_11|H1_MF_CONN_KAL))) {
+			h1_dbg("\t=== Add keep-alive in 'Connection:' header\n");
 			if (conn_val)
 				*conn_val = ist("keep-alive");
 			if (htx)
@@ -728,12 +788,14 @@ static void h1_update_res_conn_hdr(struct h1s *h1s, struct h1m *h1m,
 	}
 	else { /* H1S_F_WANT_CLO */
 		if (h1m->flags & H1_MF_CONN_KAL) {
+			h1_dbg("\t=== Remove keep-alive in 'Connection:' header\n");
 			if (conn_val)
 				*conn_val = ist("");
 			if (htx)
 				h1_remove_conn_hdrs(h1m, htx);
 		}
 		if ((h1m->flags & (H1_MF_VER_11|H1_MF_CONN_CLO)) == H1_MF_VER_11) {
+			h1_dbg("\t=== Add close in 'Connection:' header\n");
 			if (conn_val)
 				*conn_val = ist("close");
 			if (htx)
@@ -823,6 +885,8 @@ static size_t h1_process_headers(struct h1s *h1s, struct h1m *h1m, struct htx *h
 	union h1_sl h1sl;
 	unsigned int flags = HTX_SL_F_NONE;
 	int ret = 0;
+
+	h1_dbg_trace(h1s->h1c);
 
 	if (!max)
 		goto end;
@@ -968,6 +1032,7 @@ static size_t h1_process_data(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
 	size_t total = 0;
 	int ret = 0;
 
+	h1_dbg_trace(h1s->h1c);
 	if (h1m->flags & H1_MF_XFER_LEN) {
 		if (h1m->flags & H1_MF_CLEN) {
 			/* content-length: read only h2m->body_len */
@@ -984,6 +1049,9 @@ static size_t h1_process_data(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
 				h1m->curr_len -= ret;
 				*ofs += ret;
 				total += ret;
+
+				h1_dbg("\t=== H1 message: %d bytes of CLEN body parsed (remains=%lu)\n",
+				       ret, h1m->curr_len);
 			}
 
 			if (!h1m->curr_len) {
@@ -1004,6 +1072,8 @@ static size_t h1_process_data(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
 				max -= ret;
 				*ofs += ret;
 				total += ret;
+
+				h1_dbg("\t=== H1 message: CHNK CRLF parsed\n");
 			}
 
 			if (h1m->state == H1_MSG_CHUNK_SIZE) {
@@ -1026,6 +1096,8 @@ static size_t h1_process_data(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
 				max -= ret;
 				*ofs += ret;
 				total += ret;
+
+				h1_dbg("\t=== H1 message: CHNK SIZE parsed (size=%u)\n", chksz);
 			}
 
 			if (h1m->state == H1_MSG_DATA) {
@@ -1043,6 +1115,9 @@ static size_t h1_process_data(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
 					max -= ret;
 					*ofs += ret;
 					total += ret;
+
+					h1_dbg("\t=== H1 message: %d bytes of CHNK body parsed (remains=%lu)\n",
+					       ret, h1m->curr_len);
 				}
 				if (!h1m->curr_len) {
 					h1m->state = H1_MSG_CHUNK_CRLF;
@@ -1080,6 +1155,8 @@ static size_t h1_process_data(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
 				*ofs += ret;
 				total += ret;
 
+				h1_dbg("\t=== H1 message: %d bytes of CHNK trailers parsed\n", ret);
+
 			  skip_tlr_parsing:
 				if (!htx_add_endof(htx, HTX_BLK_EOM))
 					goto end;
@@ -1108,6 +1185,8 @@ static size_t h1_process_data(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
 
 			*ofs += max;
 			total = max;
+
+			h1_dbg("\t=== H1 message: %d bytes of body parsed\n", ret);
 		}
 	}
 
@@ -1117,6 +1196,8 @@ static size_t h1_process_data(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
 		h1m->err_state = h1m->state;
 		h1m->err_pos = *ofs + max + ret;
 		h1_capture_bad_message(h1s->h1c, h1s, h1m, buf);
+		h1_dbg("\t=== H1 message: Parsing error at offset %d in state %s\n",
+		       h1m->err_pos, h1m_state_str(h1m->err_state));
 		return 0;
 	}
 	/* update htx->extra, only when the body length is known */
@@ -1135,6 +1216,7 @@ static void h1_sync_messages(struct h1c *h1c)
 {
 	struct h1s *h1s = h1c->h1s;
 
+	h1_dbg_trace(h1c);
 	if (!h1s)
 		return;
 
@@ -1146,18 +1228,23 @@ static void h1_sync_messages(struct h1c *h1c)
 		 * transaction is not finished. We take care the response was
 		 * transferred before.
 		 */
+		h1_dbg("\t=== reset 1XX response\n");
 		h1m_init_res(&h1s->res);
 		h1s->res.flags |= H1_MF_NO_PHDR;
 	}
 	else if (!b_data(&h1c->obuf) &&
 		 h1s->req.state == H1_MSG_DONE && h1s->res.state == H1_MSG_DONE) {
 		if (h1s->flags & H1S_F_WANT_TUN) {
+			h1_dbg("\t=== switch H1S in TUNNEL mode\n");
 			h1m_init_req(&h1s->req);
 			h1m_init_res(&h1s->res);
 			h1s->req.state = H1_MSG_TUNNEL;
 			h1s->res.state = H1_MSG_TUNNEL;
 		}
 	}
+
+	h1_dbg("\t=== H1S states: req->state=%s - res->state=%s\n",
+	       h1m_state_str(h1s->req.state), h1m_state_str(h1s->res.state));
 }
 
 /*
@@ -1175,7 +1262,12 @@ static size_t h1_process_input(struct h1c *h1c, struct buffer *buf, int flags)
 	size_t count, max;
 	int errflag;
 
+	h1_dbg_trace(h1c);
+
 	htx = htx_from_buf(buf);
+	h1_dbg("\t>>> IBUF(len=%lu)\n",  h1c->ibuf.data);
+	h1_dbg_htx("\t>>> CHN-HTX", htx);
+
 	count = b_data(&h1c->ibuf);
 	max = htx_free_space(htx);
 	if (flags & CO_RFL_KEEP_RSV) {
@@ -1185,6 +1277,7 @@ static size_t h1_process_input(struct h1c *h1c, struct buffer *buf, int flags)
 	}
 	if (count > max)
 		count = max;
+
 
 	if (!conn_is_back(h1c->conn)) {
 		h1m = &h1s->req;
@@ -1200,11 +1293,13 @@ static size_t h1_process_input(struct h1c *h1c, struct buffer *buf, int flags)
 			ret = h1_process_headers(h1s, h1m, htx, &h1c->ibuf, &total, count);
 			if (!ret)
 				break;
+			h1_dbg("\t=== %lu bytes of headers processed\n", ret);
 		}
 		else if (h1m->state <= H1_MSG_TRAILERS) {
 			ret = h1_process_data(h1s, h1m, htx, &h1c->ibuf, &total, count);
 			if (!ret)
 				break;
+			h1_dbg("\t=== %lu bytes of body processed\n", ret);
 		}
 		else if (h1m->state == H1_MSG_DONE)
 			break;
@@ -1212,6 +1307,7 @@ static size_t h1_process_input(struct h1c *h1c, struct buffer *buf, int flags)
 			ret = h1_process_data(h1s, h1m, htx, &h1c->ibuf, &total, count);
 			if (!ret)
 				break;
+			h1_dbg("\t=== %lu bytes of raw data processed\n", ret);
 		}
 		else {
 			h1s->flags |= errflag;
@@ -1225,8 +1321,13 @@ static size_t h1_process_input(struct h1c *h1c, struct buffer *buf, int flags)
 		goto parsing_err;
 
 	b_del(&h1c->ibuf, total);
+	h1_dbg("\t=== %lu bytes transferred (h1m->state=%s - h1m->flags=0x%08x)\n",
+	       total, h1m_state_str(h1m->state), h1m->flags);
 
   end:
+	h1_dbg_htx("\t<<< CHN-HTX", htx);
+	h1_dbg("\t<<< IBUF(len=%lu)\n",  h1c->ibuf.data);
+
 	if (htx_is_not_empty(htx))
 		b_set_data(buf, b_size(buf));
 	else {
@@ -1248,8 +1349,10 @@ static size_t h1_process_input(struct h1c *h1c, struct buffer *buf, int flags)
 		h1_sync_messages(h1c);
 
 		h1s->cs->flags &= ~CS_FL_RCV_MORE;
-		if (h1s->cs->flags & CS_FL_REOS)
+		if (h1s->cs->flags & CS_FL_REOS) {
+			h1_dbg("\t=== Set CS_FL_EOS\n");
 			h1s->cs->flags |= CS_FL_EOS;
+		}
 	}
 	return total;
 
@@ -1286,6 +1389,11 @@ static size_t h1_process_output(struct h1c *h1c, struct buffer *buf, size_t coun
 		h1c->flags |= H1C_F_OUT_ALLOC;
 		goto end;
 	}
+
+	h1_dbg_trace(h1c);
+	h1_dbg("\t>>> BUF(len=%lu)\n", buf->data);
+	h1_dbg("\t>>> OBUF(len=%lu)\n", h1c->obuf.data);
+	h1_dbg_htx("\t>>> CHN-HTX", chn_htx);
 
 	if (!conn_is_back(h1c->conn)) {
 		h1m = &h1s->res;
@@ -1446,12 +1554,19 @@ static size_t h1_process_output(struct h1c *h1c, struct buffer *buf, size_t coun
   copy:
 	b_putblk(&h1c->obuf, tmp->area, tmp->data);
 
+	h1_dbg("\t=== %lu bytes transferred (h1m->state=%s - h1m->flags=0x%08x)\n",
+	       total, h1m_state_str(h1m->state), h1m->flags);
+
 	if (b_full(&h1c->obuf))
 		h1c->flags |= H1C_F_OUT_FULL;
 	if (htx_is_empty(chn_htx)) {
 		htx_reset(chn_htx);
 		b_set_data(buf, 0);
 	}
+
+	h1_dbg_htx("\t<<< CHN-HTX", chn_htx);
+	h1_dbg("\t<<< OBUF(len=%lu)\n", h1c->obuf.data);
+	h1_dbg("\t<<< BUF(len=%lu)\n", buf->data);
   end:
 	return total;
 }
@@ -1468,6 +1583,9 @@ static int h1_recv(struct h1c *h1c)
 		struct h1s *h1s = h1c->h1s;
 	size_t ret, max;
 	int rcvd = 0;
+
+	h1_dbg_trace(h1c);
+	h1_dbg("\t>>> IBUF(len=%lu)\n", h1c->ibuf.data);
 
 	if (h1c->wait_event.wait_reason & SUB_CAN_RECV)
 		return 0;
@@ -1510,6 +1628,8 @@ static int h1_recv(struct h1c *h1c)
 		h1_release_buf(h1c, &h1c->ibuf);
 	else if (b_full(&h1c->ibuf))
 		h1c->flags |= H1C_F_IN_FULL;
+
+	h1_dbg("\t<<< IBUF(len=%lu) - rcvd=%d\n", h1c->ibuf.data, rcvd);
 	return rcvd;
 }
 
@@ -1523,6 +1643,9 @@ static int h1_send(struct h1c *h1c)
 	unsigned int flags = 0;
 	size_t ret;
 	int sent = 0;
+
+	h1_dbg_trace(h1c);
+	h1_dbg("\t>>> OBUF(len=%lu)\n", h1c->obuf.data);
 
 	if (conn->flags & CO_FL_ERROR)
 		return 0;
@@ -1557,6 +1680,7 @@ static int h1_send(struct h1c *h1c)
 	else if (!(h1c->wait_event.wait_reason & SUB_CAN_SEND))
 		conn->xprt->subscribe(conn, SUB_CAN_SEND, &h1c->wait_event);
 
+	h1_dbg("\t<<< OBUF(len=%lu) - sent=%d\n", h1c->obuf.data, sent);
 	return sent;
 }
 
@@ -1571,26 +1695,35 @@ static void h1_wake_stream(struct h1c *h1c)
 	if (!h1s || !h1s->cs)
 		return;
 
-	if ((h1c->flags & H1C_F_CS_ERROR) || (conn->flags & CO_FL_ERROR))
+	h1_dbg_trace(h1c);
+	if ((h1c->flags & H1C_F_CS_ERROR) || (conn->flags & CO_FL_ERROR)) {
+		h1_dbg("\t=== Set CS_FL_ERROR\n");
 		flags |= CS_FL_ERROR;
-	if (conn_xprt_read0_pending(conn))
+	}
+	if (conn_xprt_read0_pending(conn)) {
+		h1_dbg("\t=== Set CS_FL_REOS\n");
 		flags |= CS_FL_REOS;
+	}
 
 	h1s->cs->flags |= flags;
 	if (h1s->recv_wait) {
+		h1_dbg("\t=== WAKEUP FOR RECV\n");
 		h1s->recv_wait->wait_reason &= ~SUB_CAN_RECV;
 		tasklet_wakeup(h1s->recv_wait->task);
 		h1s->recv_wait = NULL;
 		dont_wake = 1;
 	}
 	if (h1s->send_wait) {
+		h1_dbg("\t=== WAKEUP FOR SEND\n");
 		h1s->send_wait->wait_reason &= ~SUB_CAN_SEND;
 		tasklet_wakeup(h1s->send_wait->task);
 		h1s->send_wait = NULL;
 		dont_wake = 1;
 	}
-	if (!dont_wake && h1s->cs->data_cb->wake)
+	if (!dont_wake && h1s->cs->data_cb->wake) {
+		h1_dbg("\t=== WAKE-CB\n");
 		h1s->cs->data_cb->wake(h1s->cs);
+	}
 }
 
 /* callback called on any event by the connection handler.
@@ -1601,6 +1734,10 @@ static int h1_process(struct h1c * h1c)
 {
 	struct connection *conn = h1c->conn;
 	struct h1s *h1s = h1c->h1s;
+
+	h1_dbg_trace(h1c);
+	h1_dbg("\t=== IBUF(len=%lu)\n", h1c->ibuf.data);
+	h1_dbg("\t=== OBUF(len=%lu)\n", h1c->obuf.data);
 
 	if (!conn->mux_ctx)
 		return -1;
@@ -1627,6 +1764,7 @@ static int h1_process(struct h1c * h1c)
 		h1s->csinfo.t_idle = tv_ms_elapsed(&h1s->csinfo.tv_create, &now) - h1s->csinfo.t_handshake;
 
 	h1_wake_stream(h1c);
+
   end:
 	return 0;
 
@@ -1640,6 +1778,7 @@ static struct task *h1_io_cb(struct task *t, void *ctx, unsigned short status)
 	struct h1c *h1c = ctx;
 	int ret = 0;
 
+	h1_dbg_trace(h1c);
 	if (!(h1c->wait_event.wait_reason & SUB_CAN_SEND))
 		ret = h1_send(h1c);
 	if (!(h1c->wait_event.wait_reason & SUB_CAN_RECV))
@@ -1658,6 +1797,8 @@ static int h1_wake(struct connection *conn)
 	return h1_process(h1c);
 }
 
+
+
 /*******************************************/
 /* functions below are used by the streams */
 /*******************************************/
@@ -1670,6 +1811,8 @@ static struct conn_stream *h1_attach(struct connection *conn)
 	struct h1c *h1c = conn->mux_ctx;
 	struct conn_stream *cs = NULL;
 	struct h1s *h1s;
+
+	h1_dbg_trace(h1c);
 
 	if (h1c->flags & H1C_F_CS_ERROR)
 		goto end;
@@ -1725,6 +1868,8 @@ static void h1_detach(struct conn_stream *cs)
 	h1c = h1s->h1c;
 	h1s->cs = NULL;
 
+	h1_dbg_trace(h1c);
+
 	if (conn_is_back(h1c->conn) && (h1s->flags & H1S_F_WANT_KAL)) {
 		/* Never ever allow to reuse a connection from a non-reuse backend */
 		if (h1c->conn && (h1c->px->options & PR_O_REUSE_MASK) == PR_O_REUSE_NEVR)
@@ -1753,15 +1898,22 @@ static void h1_detach(struct conn_stream *cs)
 		h1_release(h1c->conn);
 	else
 		tasklet_wakeup(h1c->wait_event.task);
-}
 
+}
 
 static void h1_shutr(struct conn_stream *cs, enum cs_shr_mode mode)
 {
 	struct h1s *h1s = cs->ctx;
+	struct h1c *h1c;
 
 	if (!h1s)
 		return;
+
+	h1c = h1s->h1c;
+
+	h1_dbg_trace(h1c);
+	h1_dbg("\t=== IBUF(len=%lu)\n",   h1c->ibuf.data);
+	h1_dbg("\t=== OBUF(len=%lu)\n",   h1c->obuf.data);
 
 	if ((h1s->flags & H1S_F_WANT_KAL) && !(cs->flags & (CS_FL_REOS|CS_FL_EOS)))
 		return;
@@ -1772,7 +1924,7 @@ static void h1_shutr(struct conn_stream *cs, enum cs_shr_mode mode)
 	if (conn_xprt_ready(cs->conn) && cs->conn->xprt->shutr)
 		cs->conn->xprt->shutr(cs->conn, (mode == CS_SHR_DRAIN));
 	if (cs->flags & CS_FL_SHW) {
-		h1s->h1c->flags = (h1s->h1c->flags & ~H1C_F_CS_SHUTW_NOW) | H1C_F_CS_SHUTW;
+		h1c->flags = (h1c->flags & ~H1C_F_CS_SHUTW_NOW) | H1C_F_CS_SHUTW;
 		conn_full_close(cs->conn);
 	}
 }
@@ -1785,6 +1937,10 @@ static void h1_shutw(struct conn_stream *cs, enum cs_shw_mode mode)
 	if (!h1s)
 		return;
 	h1c = h1s->h1c;
+
+	h1_dbg_trace(h1c);
+	h1_dbg("\t=== IBUF(len=%lu)\n",   h1c->ibuf.data);
+	h1_dbg("\t=== OBUF(len=%lu)\n",   h1c->obuf.data);
 
 	if ((h1s->flags & H1S_F_WANT_KAL) &&
 	    !(cs->flags & (CS_FL_REOS|CS_FL_EOS)) &&
@@ -1802,6 +1958,7 @@ static void h1_shutw_conn(struct connection *conn)
 {
 	struct h1c *h1c = conn->mux_ctx;
 
+	h1_dbg_trace(h1c);
 	if (conn_xprt_ready(conn) && conn->xprt->shutw)
 		conn->xprt->shutw(conn, 1);
 	if (!(conn->flags & CO_FL_SOCK_RD_SH))
@@ -1821,9 +1978,11 @@ static int h1_unsubscribe(struct conn_stream *cs, int event_type, void *param)
 	if (!h1s)
 		return 0;
 
+	h1_dbg_trace(h1s->h1c);
 	if (event_type & SUB_CAN_RECV) {
 		sw = param;
 		if (h1s->recv_wait == sw) {
+			h1_dbg("\t=== SUB_CAN_RECV %p\n", sw);
 			sw->wait_reason &= ~SUB_CAN_RECV;
 			h1s->recv_wait = NULL;
 		}
@@ -1831,6 +1990,7 @@ static int h1_unsubscribe(struct conn_stream *cs, int event_type, void *param)
 	if (event_type & SUB_CAN_SEND) {
 		sw = param;
 		if (h1s->send_wait == sw) {
+			h1_dbg("\t=== SUB_CAN_SEND %p\n", sw);
 			sw->wait_reason &= ~SUB_CAN_SEND;
 			h1s->send_wait = NULL;
 		}
@@ -1847,10 +2007,12 @@ static int h1_subscribe(struct conn_stream *cs, int event_type, void *param)
 	if (!h1s)
 		return -1;
 
+	h1_dbg_trace(h1s->h1c);
 	switch (event_type) {
 		case SUB_CAN_RECV:
 			sw = param;
 			if (!(sw->wait_reason & SUB_CAN_RECV)) {
+				h1_dbg("\t=== SUB_CAN_RECV %p\n", sw);
 				sw->wait_reason |= SUB_CAN_RECV;
 				sw->handle = h1s;
 				h1s->recv_wait = sw;
@@ -1859,6 +2021,7 @@ static int h1_subscribe(struct conn_stream *cs, int event_type, void *param)
 		case SUB_CAN_SEND:
 			sw = param;
 			if (!(sw->wait_reason & SUB_CAN_SEND)) {
+				h1_dbg("\t=== SUB_CAN_SEND %p\n", sw);
 				sw->wait_reason |= SUB_CAN_SEND;
 				sw->handle = h1s;
 				h1s->send_wait = sw;
@@ -1877,8 +2040,11 @@ static size_t h1_rcv_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 	struct h1c *h1c = h1s->h1c;
 	size_t ret = 0;
 
+	h1_dbg_trace(h1c);
+	h1_dbg("\t>>> count=%lu - flags=0x%08x\n", count, flags);
 	if (!(h1c->flags & H1C_F_IN_ALLOC))
 		ret = h1_process_input(h1c, buf, flags);
+	h1_dbg("\t<<< ret=%lu\n", ret);
 
 	if (flags & CO_RFL_BUF_FLUSH)
 		h1s->flags |= H1S_F_BUF_FLUSH;
@@ -1902,6 +2068,9 @@ static size_t h1_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 		return 0;
 
 	h1c = h1s->h1c;
+	h1_dbg_trace(h1c);
+	h1_dbg("\t>>> count=%lu - flags=0x%08x\n", count, flags);
+
 	if (h1c->flags & H1C_F_CS_WAIT_CONN)
 		return 0;
 
@@ -1928,6 +2097,8 @@ static size_t h1_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 		if (!(h1c->wait_event.wait_reason & SUB_CAN_SEND))
 			cs->conn->xprt->subscribe(cs->conn, SUB_CAN_SEND, &h1c->wait_event);
 	}
+
+	h1_dbg("\t<<< ret=%lu\n", total);
 	return total;
 }
 
@@ -1938,6 +2109,9 @@ static int h1_rcv_pipe(struct conn_stream *cs, struct pipe *pipe, unsigned int c
 	struct h1s *h1s = cs->ctx;
 	struct h1m *h1m = (!conn_is_back(cs->conn) ? &h1s->req : &h1s->res);
 	int ret = 0;
+
+	h1_dbg_trace(h1s->h1c);
+	h1_dbg("\t>>> count=%u - pipe->data=%d - curr_len=%lu\n", count, pipe->data, h1m->curr_len);
 
 	if (b_data(&h1s->h1c->ibuf)) {
 		h1s->flags |= H1S_F_BUF_FLUSH;
@@ -1952,6 +2126,9 @@ static int h1_rcv_pipe(struct conn_stream *cs, struct pipe *pipe, unsigned int c
 	if (h1m->state == H1_MSG_DATA && ret > 0)
 		h1m->curr_len -= ret;
   end:
+	h1_dbg("\t<<< ret=%d - pipe->data=%d - curr_len=%lu\n", ret, pipe->data, h1m->curr_len);
+	h1_dbg("\tcs->flags=0x%08x - conn->flags=0x%08x\n", cs->flags, cs->conn->flags);
+
 	return ret;
 
 }
@@ -1961,15 +2138,20 @@ static int h1_snd_pipe(struct conn_stream *cs, struct pipe *pipe)
 	struct h1s *h1s = cs->ctx;
 	int ret = 0;
 
+	h1_dbg_trace(h1s->h1c);
+	h1_dbg("\t>>> pipe->data=%d\n", pipe->data);
+
 	if (b_data(&h1s->h1c->obuf))
 		goto end;
-
 	ret = cs->conn->xprt->snd_pipe(cs->conn, pipe);
   end:
 	if (pipe->data) {
 		if (!(h1s->h1c->wait_event.wait_reason & SUB_CAN_SEND))
 			cs->conn->xprt->subscribe(cs->conn, SUB_CAN_SEND, &h1s->h1c->wait_event);
 	}
+
+	h1_dbg("\t<<< ret=%d - pipe->data=%d\n", ret, pipe->data);
+	h1_dbg("\tcs->flags=0x%08x - conn->flags=0x%08x\n", cs->flags, cs->conn->flags);
 	return ret;
 }
 #endif
