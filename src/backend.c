@@ -591,8 +591,7 @@ int assign_server(struct stream *s)
 	    (conn->flags & CO_FL_CONNECTED) &&
 	    objt_server(conn->target) && __objt_server(conn->target)->proxy == s->be &&
 	    (s->be->lbprm.algo & BE_LB_KIND) != BE_LB_KIND_HI &&
-	    ((s->txn && s->txn->flags & TX_PREFER_LAST) || /* Used by the legacy HTTP */
-	     (cs && cs->flags & CS_FL_PREFER_LAST) ||      /* Used by the HTX */
+	    ((cs && cs->flags & CS_FL_PREFER_LAST) ||
 	     ((s->be->options & PR_O_PREF_LAST) &&
 	      (!s->be->max_ka_queue ||
 	       server_has_room(__objt_server(conn->target)) ||

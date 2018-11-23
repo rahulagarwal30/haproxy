@@ -3873,7 +3873,7 @@ void http_end_txn_clean_session(struct stream *s)
 		 * it's better to do it (at least it helps with debugging), at
 		 * least for non-deterministic load balancing algorithms.
 		 */
-		s->txn->flags |= TX_PREFER_LAST;
+		s->si[1].flags |= CS_FL_PREFER_LAST;
 	}
 
 	/* Never ever allow to reuse a connection from a non-reuse backend */
