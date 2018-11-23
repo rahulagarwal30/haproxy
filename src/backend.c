@@ -558,6 +558,7 @@ static struct server *get_server_rnd(struct stream *s)
 int assign_server(struct stream *s)
 {
 	struct connection *conn;
+	struct conn_stream *cs;
 	struct server *conn_slot;
 	struct server *srv, *prev_srv;
 	int err;
@@ -585,12 +586,13 @@ int assign_server(struct stream *s)
 	srv = NULL;
 	s->target = NULL;
 	conn = s->sess->srv_conn;
-
+	cs = objt_cs(s->si[1].end);
 	if (conn &&
 	    (conn->flags & CO_FL_CONNECTED) &&
 	    objt_server(conn->target) && __objt_server(conn->target)->proxy == s->be &&
 	    (s->be->lbprm.algo & BE_LB_KIND) != BE_LB_KIND_HI &&
-	    ((s->txn && s->txn->flags & TX_PREFER_LAST) ||
+	    ((s->txn && s->txn->flags & TX_PREFER_LAST) || /* Used by the legacy HTTP */
+	     (cs && cs->flags & CS_FL_PREFER_LAST) ||      /* Used by the HTX */
 	     ((s->be->options & PR_O_PREF_LAST) &&
 	      (!s->be->max_ka_queue ||
 	       server_has_room(__objt_server(conn->target)) ||

@@ -46,6 +46,7 @@
 #define H1C_F_CS_WAIT_CONN   0x00008000 /* waiting for the connection establishment */
 
 #define H1C_F_WAIT_NEXT_REQ  0x00010000 /*  waiting for the next request to start, use keep-alive timeout */
+#define H1C_F_PREFER_LAST    0x00020000 /* try to stay on same server if possible */
 
 /*
  * H1 Stream flags (32 bits)
@@ -221,6 +222,8 @@ static struct conn_stream *h1s_new_cs(struct h1s *h1s)
 
 	if (h1s->flags & H1S_F_NOT_FIRST)
 		cs->flags |= CS_FL_NOT_FIRST;
+	if (h1s->h1c->flags & H1C_F_PREFER_LAST)
+		cs->flags |= CS_FL_PREFER_LAST;
 
 	if (stream_create_from_cs(cs) < 0)
 		goto err;
@@ -260,7 +263,6 @@ static struct h1s *h1s_create(struct h1c *h1c, struct conn_stream *cs)
 
 	if (h1c->flags & H1C_F_WAIT_NEXT_REQ)
 		h1s->flags |= H1S_F_NOT_FIRST;
-	h1c->flags &= ~H1C_F_WAIT_NEXT_REQ;
 
 	if (!conn_is_back(h1c->conn)) {
 		if (h1c->px->options2 & PR_O2_REQBUG_OK)
@@ -295,6 +297,9 @@ static struct h1s *h1s_create(struct h1c *h1c, struct conn_stream *cs)
 		if (!cs)
 			goto fail;
 	}
+
+	/* Reset H1C flags for the next HTTP transaction */
+	h1c->flags &= ~(H1C_F_WAIT_NEXT_REQ|H1C_F_PREFER_LAST);
 	return h1s;
 
   fail:
@@ -314,6 +319,8 @@ static void h1s_destroy(struct h1s *h1s)
 		if (h1s->send_wait != NULL)
 			h1s->send_wait->wait_reason &= ~SUB_CAN_SEND;
 
+		if (h1s->status == 401 || h1s->status == 407)
+			h1c->flags |= H1C_F_PREFER_LAST;
 		h1c->flags |= H1C_F_WAIT_NEXT_REQ;
 		if (h1s->flags & (H1S_F_REQ_ERROR|H1S_F_RES_ERROR))
 			h1c->flags |= H1C_F_CS_ERROR;
