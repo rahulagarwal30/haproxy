@@ -76,6 +76,11 @@ static inline void session_add_conn(struct session *sess, struct connection *con
 	int avail = -1;
 	int i;
 
+	if (sess->resp_conns >= sess->fe->max_out_conns) {
+		conn->owner = NULL;
+		return;
+	}
+	sess->resp_conns++;
 	for (i = 0; i < MAX_SRV_LIST; i++) {
 		if (sess->srv_list[i].target == target) {
 			avail = i;
@@ -99,6 +104,7 @@ static inline void session_add_conn(struct session *sess, struct connection *con
 		}
 		/* Now unown all the connections */
 		list_for_each_entry_safe(conn, conn_back, &sess->srv_list[avail].list, session_list) {
+			sess->resp_conns--;
 			conn->owner = NULL;
 			LIST_DEL(&conn->session_list);
 			LIST_INIT(&conn->session_list);

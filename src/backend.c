@@ -1283,6 +1283,7 @@ int connect_server(struct stream *s)
 	if (srv_conn && old_conn != srv_conn) {
 		srv_conn->owner = s->sess;
 		LIST_DEL(&srv_conn->session_list);
+		LIST_INIT(&srv_conn->session_list);
 		session_add_conn(s->sess, srv_conn, s->target);
 	}
 

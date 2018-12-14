@@ -64,6 +64,7 @@ struct session *session_new(struct proxy *fe, struct listener *li, enum obj_type
 			sess->srv_list[i].target = NULL;
 			LIST_INIT(&sess->srv_list[i].list);
 		}
+		sess->resp_conns = 0;
 	}
 	return sess;
 }
