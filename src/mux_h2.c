@@ -2829,7 +2829,7 @@ static void h2_detach(struct conn_stream *cs)
 					if (h2c->conn->flags & CO_FL_PRIVATE)
 						LIST_ADD(&srv->priv_conns[tid], &h2c->conn->list);
 					else
-						LIST_ADD(&srv->idle_conns[tid], &h2c->conn->list);
+						LIST_ADD(&srv->safe_conns[tid], &h2c->conn->list);
 				}
 
 			}
