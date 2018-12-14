@@ -2847,7 +2847,11 @@ static void h2_detach(struct conn_stream *cs)
 		    (CO_FL_ERROR | CO_FL_SOCK_RD_SH | CO_FL_SOCK_WR_SH))) {
 			if (!h2c->conn->owner) {
 				h2c->conn->owner = sess;
-				session_add_conn(sess, h2c->conn, h2c->conn->target);
+				session_add_idle_conn(sess, h2c->conn, h2c->conn->target);
+			} else if (eb_is_empty(&h2c->streams_by_id)) {
+				if (session_check_idle_conn(h2c->conn->owner, h2c->conn) != 0)
+					/* At this point either the connection is destroyed, or it's been added to the server idle list, just stop */
+					return;
 			}
 			/* Never ever allow to reuse a connection from a non-reuse backend */
 			if ((h2c->proxy->options & PR_O_REUSE_MASK) == PR_O_REUSE_NEVR)

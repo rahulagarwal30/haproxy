@@ -454,6 +454,7 @@ void init_default_instance()
 	defproxy.conn_retries = CONN_RETRIES;
 	defproxy.redispatch_after = 0;
 	defproxy.lbprm.chash.balance_factor = 0;
+	defproxy.max_out_conns = MAX_SRV_LIST;
 
 	defproxy.defsrv.check.inter = DEF_CHKINTR;
 	defproxy.defsrv.check.fastinter = 0;
